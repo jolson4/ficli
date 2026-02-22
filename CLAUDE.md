@@ -128,7 +128,9 @@ make clean    # clean build artifacts
 - [x] Allow uncategorizing transactions in `e` or `c` mode ([plan](../.claude/plans/uncategorize-transaction-edit.md))
 - [x] Allow mass-renaming payee after filtering transactions list ([plan](../.claude/plans/mass-rename-payee-filtered-list.md))
 - [x] Make QIF import include categorization. Prompt user to create new category, assign to other category, or leave uncategorized when QIF transaction has a category that doesn't exist in the app yet. (Also applies category fields from CSV imports.) ([plan](../.claude/plans/import-category-qif-csv.md))
+- [ ] Add CLI arguments for quick actions (e.g., `ficli import -account "CapitalOne" -file ~/Downloads/transactions.csv`)
 - [ ] Allow user to focus and edit transactions in budget view
+- [ ] Allow annual budget for categories with monthly breakdowns
 - [ ] Automatically convert transaction to transfer when importing a transaction and there's a matching transaction in another account
 - [ ] Summary/report views
 - [ ] Add investment purchases/sales with cost basis tracking
@@ -147,4 +149,3 @@ make clean    # clean build artifacts
 - [ ] Add password protection and encryption
 - [ ] Allow user to choose whether to delete linked transfer transactions when deleting a transaction
 - [ ] Add error UI for handling logic mismatches, e.g. transfers with more than 2 transactions
-- [ ] Add CLI arguments for quick actions (e.g., `ficli add -a`)
