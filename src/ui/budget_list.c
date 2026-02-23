@@ -2,6 +2,7 @@
 
 #include "db/query.h"
 #include "ui/colors.h"
+#include "ui/form.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -47,6 +48,9 @@ struct budget_list_state {
     budget_txn_row_t *related_txns;
     int related_txn_count;
     bool related_visible;
+    bool related_focus;
+    int related_cursor;
+    int related_scroll;
     int64_t related_category_id;
     char related_category_name[64];
 
@@ -650,12 +654,34 @@ filter_mode_label(budget_category_filter_mode_t mode) {
                : "Exclude selected categories";
 }
 
+static void clamp_related_selection(budget_list_state_t *ls) {
+    if (!ls)
+        return;
+    if (ls->related_txn_count <= 0) {
+        ls->related_cursor = 0;
+        ls->related_scroll = 0;
+        ls->related_focus = false;
+        return;
+    }
+    if (ls->related_cursor < 0)
+        ls->related_cursor = 0;
+    if (ls->related_cursor >= ls->related_txn_count)
+        ls->related_cursor = ls->related_txn_count - 1;
+    if (ls->related_scroll < 0)
+        ls->related_scroll = 0;
+    if (ls->related_scroll >= ls->related_txn_count)
+        ls->related_scroll = ls->related_txn_count - 1;
+}
+
 static void clear_related_transactions(budget_list_state_t *ls) {
     if (!ls)
         return;
     free(ls->related_txns);
     ls->related_txns = NULL;
     ls->related_txn_count = 0;
+    ls->related_cursor = 0;
+    ls->related_scroll = 0;
+    ls->related_focus = false;
 }
 
 static void refresh_related_transactions(budget_list_state_t *ls) {
@@ -674,6 +700,7 @@ static void refresh_related_transactions(budget_list_state_t *ls) {
     clear_related_transactions(ls);
     ls->related_txns = related;
     ls->related_txn_count = related_count;
+    clamp_related_selection(ls);
 }
 
 static void reload_rows(budget_list_state_t *ls) {
@@ -758,9 +785,12 @@ static void reload_rows(budget_list_state_t *ls) {
         } else {
             clear_related_transactions(ls);
             ls->related_visible = false;
+            ls->related_focus = false;
             ls->related_category_id = 0;
             ls->related_category_name[0] = '\0';
         }
+    } else {
+        ls->related_focus = false;
     }
 
     ls->dirty = false;
@@ -1192,12 +1222,16 @@ static void draw_related_transactions_section(budget_list_state_t *ls, WINDOW *w
                                               int separator_row, int title_row,
                                               int header_row, int rule_row,
                                               int data_row_start,
-                                              int visible_rows) {
+                                              int visible_rows,
+                                              int selected_idx, int scroll,
+                                              bool section_focused) {
     if (!ls || !win || visible_rows <= 0)
         return;
 
-    for (int col = left; col < left + avail; col++)
-        mvwaddch(win, separator_row, col, ACS_HLINE);
+    if (separator_row >= 0) {
+        for (int col = left; col < left + avail; col++)
+            mvwaddch(win, separator_row, col, ACS_HLINE);
+    }
 
     int data_row_end = data_row_start + visible_rows - 1;
     for (int row = title_row; row <= data_row_end; row++)
@@ -1270,13 +1304,26 @@ static void draw_related_transactions_section(budget_list_state_t *ls, WINDOW *w
         return;
     }
 
-    int shown = ls->related_txn_count;
+    if (scroll < 0)
+        scroll = 0;
+    if (scroll >= ls->related_txn_count)
+        scroll = ls->related_txn_count - 1;
+
+    int shown = ls->related_txn_count - scroll;
     if (shown > visible_rows)
         shown = visible_rows;
 
     for (int i = 0; i < shown; i++) {
         int row = data_row_start + i;
-        const budget_txn_row_t *txn = &ls->related_txns[i];
+        int txn_idx = scroll + i;
+        const budget_txn_row_t *txn = &ls->related_txns[txn_idx];
+        bool selected = (txn_idx == selected_idx);
+
+        if (selected) {
+            if (!section_focused)
+                wattron(win, A_DIM);
+            wattron(win, A_REVERSE);
+        }
 
         mvwprintw(win, row, date_col, "%-*.*s", date_w, date_w,
                   txn->effective_date);
@@ -1296,6 +1343,12 @@ static void draw_related_transactions_section(budget_list_state_t *ls, WINDOW *w
         char details[512];
         compose_related_details(txn, details, sizeof(details));
         mvwprintw(win, row, details_col, "%-*.*s", details_w, details_w, details);
+
+        if (selected) {
+            wattroff(win, A_REVERSE);
+            if (!section_focused)
+                wattroff(win, A_DIM);
+        }
     }
 }
 
@@ -1319,9 +1372,41 @@ static void show_related_transactions_for_cursor(budget_list_state_t *ls) {
     ls->related_txns = related;
     ls->related_txn_count = related_count;
     ls->related_visible = true;
+    ls->related_focus = (related_count > 0);
+    ls->related_cursor = 0;
+    ls->related_scroll = 0;
     ls->related_category_id = drow->row.category_id;
     snprintf(ls->related_category_name, sizeof(ls->related_category_name), "%s",
              drow->row.category_name);
+    clamp_related_selection(ls);
+}
+
+static bool edit_selected_related_transaction(budget_list_state_t *ls, WINDOW *parent) {
+    if (!ls || !parent || !ls->related_focus || ls->related_txn_count <= 0 ||
+        !ls->related_txns)
+        return false;
+    clamp_related_selection(ls);
+    if (ls->related_cursor < 0 || ls->related_cursor >= ls->related_txn_count)
+        return false;
+
+    int64_t txn_id = ls->related_txns[ls->related_cursor].id;
+    if (txn_id <= 0)
+        return false;
+
+    transaction_t txn = {0};
+    int rc = db_get_transaction_by_id(ls->db, (int)txn_id, &txn);
+    if (rc != 0) {
+        snprintf(ls->message, sizeof(ls->message), "Error loading transaction");
+        ls->dirty = true;
+        return true;
+    }
+
+    form_result_t res = form_transaction(parent, ls->db, &txn, true);
+    if (res == FORM_SAVED) {
+        ls->dirty = true;
+        snprintf(ls->message, sizeof(ls->message), "Saved transaction");
+    }
+    return true;
 }
 
 static void draw_budget_category_row(
@@ -1585,32 +1670,22 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     if (body_rows < 1)
         body_rows = 1;
 
-    const int category_fixed_rows = 6; // 2x (title, header, rule)
-    const int category_min_data_rows = 2;
-    const int category_min_rows = category_fixed_rows + category_min_data_rows;
-    const int related_gap_rows = 1;
-    const int related_fixed_rows = 4; // separator + title + header + rule
-    const int related_min_data_rows = 1;
-    const int related_desired_data_rows = 5;
+    const int table_fixed_rows = 3; // title + header + rule
+    const int related_fixed_rows = 3; // title + header + rule
+    const int table_gap_rows = 4;
+    const int min_table_data_rows = 1;
 
-    bool show_related_section = false;
-    int related_visible_rows = 0;
-    int category_rows = body_rows;
-    if (body_rows >= category_min_rows + related_gap_rows + related_fixed_rows +
-                         related_min_data_rows) {
-        int max_related_data =
-            body_rows - category_min_rows - related_gap_rows - related_fixed_rows;
-        if (max_related_data >= related_min_data_rows) {
-            show_related_section = true;
-            related_visible_rows = max_related_data;
-            if (related_visible_rows > related_desired_data_rows)
-                related_visible_rows = related_desired_data_rows;
-            category_rows = body_rows - related_gap_rows - related_fixed_rows -
-                            related_visible_rows;
-        }
-    }
+    int budgeted_needed = ls->budgeted_count > 0 ? ls->budgeted_count : 1;
+    int unbudgeted_needed = ls->unbudgeted_count > 0 ? ls->unbudgeted_count : 1;
+    int related_needed = 1;
+    if (ls->related_visible && ls->related_txn_count > 0)
+        related_needed = ls->related_txn_count;
 
-    if (category_rows < category_min_rows) {
+    int min_required_rows = table_fixed_rows + min_table_data_rows +
+                            table_gap_rows + table_fixed_rows +
+                            min_table_data_rows + table_gap_rows +
+                            related_fixed_rows + min_table_data_rows;
+    if (body_rows < min_required_rows) {
         mvwprintw(win, tables_start_row, left, "Window too small for budget tables");
         curs_set(0);
         if (ls->filter_panel_open)
@@ -1618,29 +1693,33 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
         return;
     }
 
-    int category_data_slots = category_rows - category_fixed_rows;
-    if (category_data_slots < 2)
-        category_data_slots = 2;
+    int budgeted_visible_rows = min_table_data_rows;
+    int unbudgeted_visible_rows = min_table_data_rows;
+    int related_visible_rows = min_table_data_rows;
+    int spare_rows = body_rows - min_required_rows;
 
-    int budgeted_needed = ls->budgeted_count > 0 ? ls->budgeted_count : 1;
-    int unbudgeted_needed = ls->unbudgeted_count > 0 ? ls->unbudgeted_count : 1;
-    int budgeted_visible_rows = category_data_slots / 2;
-    if (budgeted_visible_rows < 1)
-        budgeted_visible_rows = 1;
-    int unbudgeted_visible_rows = category_data_slots - budgeted_visible_rows;
-    if (unbudgeted_visible_rows < 1) {
-        unbudgeted_visible_rows = 1;
-        budgeted_visible_rows = category_data_slots - 1;
+    int add = related_needed - related_visible_rows;
+    if (add > 0) {
+        if (add > spare_rows)
+            add = spare_rows;
+        related_visible_rows += add;
+        spare_rows -= add;
     }
-    while (budgeted_visible_rows > budgeted_needed &&
-           unbudgeted_visible_rows < unbudgeted_needed) {
-        budgeted_visible_rows--;
-        unbudgeted_visible_rows++;
+
+    add = budgeted_needed - budgeted_visible_rows;
+    if (add > 0) {
+        if (add > spare_rows)
+            add = spare_rows;
+        budgeted_visible_rows += add;
+        spare_rows -= add;
     }
-    while (unbudgeted_visible_rows > unbudgeted_needed &&
-           budgeted_visible_rows < budgeted_needed) {
-        unbudgeted_visible_rows--;
-        budgeted_visible_rows++;
+
+    add = unbudgeted_needed - unbudgeted_visible_rows;
+    if (add > 0) {
+        if (add > spare_rows)
+            add = spare_rows;
+        unbudgeted_visible_rows += add;
+        spare_rows -= add;
     }
 
     int total_selectable = selectable_row_count(ls);
@@ -1661,6 +1740,9 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
                                 budgeted_visible_rows, cursor_budgeted_idx);
     keep_section_scroll_visible(&ls->unbudgeted_scroll, ls->unbudgeted_count,
                                 unbudgeted_visible_rows, cursor_unbudgeted_idx);
+    int related_selected_idx = ls->related_focus ? ls->related_cursor : -1;
+    keep_section_scroll_visible(&ls->related_scroll, ls->related_txn_count,
+                                related_visible_rows, related_selected_idx);
 
     int selected_draw_row = -1;
 
@@ -1668,12 +1750,18 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     int budgeted_header_row = budgeted_title_row + 1;
     int budgeted_rule_row = budgeted_header_row + 1;
     int budgeted_data_row_start = budgeted_rule_row + 1;
-    int unbudgeted_title_row = budgeted_data_row_start + budgeted_visible_rows;
+    int unbudgeted_title_row =
+        budgeted_data_row_start + budgeted_visible_rows + table_gap_rows;
     int unbudgeted_header_row = unbudgeted_title_row + 1;
     int unbudgeted_rule_row = unbudgeted_header_row + 1;
     int unbudgeted_data_row_start = unbudgeted_rule_row + 1;
+    int related_title_row =
+        unbudgeted_data_row_start + unbudgeted_visible_rows + table_gap_rows;
+    int related_header_row = related_title_row + 1;
+    int related_rule_row = related_header_row + 1;
+    int related_data_row_start = related_rule_row + 1;
 
-    for (int row = body_start_row; row < body_start_row + category_rows; row++)
+    for (int row = body_start_row; row <= body_end_row; row++)
         mvwprintw(win, row, left, "%-*s", avail, "");
 
     wattron(win, A_BOLD);
@@ -1684,7 +1772,8 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     wattron(win, A_BOLD);
     mvwprintw(win, budgeted_header_row, category_col, "%-*s", cat_w, "Category");
     mvwprintw(win, budgeted_header_row, budget_col, "%-*s", budget_w, "Budget");
-    mvwprintw(win, budgeted_header_row, running_col, "%-*s", running_w, "Run");
+    mvwprintw(win, budgeted_header_row, running_col, "%-*s", running_w,
+              "Running +/-");
     mvwprintw(win, budgeted_header_row, net_col, "%-*s", net_w, "Net");
     mvwprintw(win, budgeted_header_row, pct_col, "%-*s", pct_w, "%");
     if (bar_w > 0)
@@ -1692,7 +1781,8 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
 
     mvwprintw(win, unbudgeted_header_row, category_col, "%-*s", cat_w, "Category");
     mvwprintw(win, unbudgeted_header_row, budget_col, "%-*s", budget_w, "Budget");
-    mvwprintw(win, unbudgeted_header_row, running_col, "%-*s", running_w, "Run");
+    mvwprintw(win, unbudgeted_header_row, running_col, "%-*s", running_w,
+              "Running +/-");
     mvwprintw(win, unbudgeted_header_row, net_col, "%-*s", net_w, "Net");
     mvwprintw(win, unbudgeted_header_row, pct_col, "%-*s", pct_w, "%");
     if (bar_w > 0)
@@ -1718,7 +1808,7 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
                 continue;
             int draw_row = budgeted_data_row_start + i;
             int selection_idx = section_idx;
-            bool selected = (selection_idx == ls->cursor);
+            bool selected = (!ls->related_focus && selection_idx == ls->cursor);
             draw_budget_category_row(
                 ls, win, draw_row, left, avail, category_col, cat_w, budget_col,
                 budget_w, running_col, running_w, net_col, net_w, pct_col, pct_w,
@@ -1743,7 +1833,7 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
                 continue;
             int draw_row = unbudgeted_data_row_start + i;
             int selection_idx = ls->budgeted_count + section_idx;
-            bool selected = (selection_idx == ls->cursor);
+            bool selected = (!ls->related_focus && selection_idx == ls->cursor);
             draw_budget_category_row(
                 ls, win, draw_row, left, avail, category_col, cat_w, budget_col,
                 budget_w, running_col, running_w, net_col, net_w, pct_col, pct_w,
@@ -1753,16 +1843,12 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
         }
     }
 
-    if (show_related_section && related_visible_rows > 0) {
-        int related_sep_row = body_start_row + category_rows;
-        int related_title_row = related_sep_row + 1;
-        int related_header_row = related_title_row + 1;
-        int related_rule_row = related_header_row + 1;
-        int related_data_row_start = related_rule_row + 1;
+    if (related_visible_rows > 0) {
         draw_related_transactions_section(
-            ls, win, left, avail, related_sep_row, related_title_row,
+            ls, win, left, avail, -1, related_title_row,
             related_header_row, related_rule_row, related_data_row_start,
-            related_visible_rows);
+            related_visible_rows, related_selected_idx, ls->related_scroll,
+            focused && ls->related_focus);
     }
 
     if (ls->filter_panel_open) {
@@ -1925,7 +2011,6 @@ static bool handle_edit_key(budget_list_state_t *ls, int ch) {
 }
 
 bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
-    (void)parent;
     if (!ls)
         return false;
     ls->message[0] = '\0';
@@ -1973,6 +2058,54 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
 
     if (ls->filter_panel_open)
         return handle_filter_panel_key(ls, ch);
+
+    if (ls->related_focus) {
+        switch (ch) {
+        case KEY_UP:
+        case 'k':
+            if (ls->related_txn_count > 0 && ls->related_cursor > 0)
+                ls->related_cursor--;
+            return true;
+        case KEY_DOWN:
+        case 'j':
+            if (ls->related_txn_count > 0 &&
+                ls->related_cursor < ls->related_txn_count - 1)
+                ls->related_cursor++;
+            return true;
+        case KEY_HOME:
+        case 'g':
+            ls->related_cursor = 0;
+            return true;
+        case KEY_END:
+        case 'G':
+            if (ls->related_txn_count > 0)
+                ls->related_cursor = ls->related_txn_count - 1;
+            return true;
+        case KEY_NPAGE:
+            if (ls->related_txn_count > 0) {
+                ls->related_cursor += 10;
+                if (ls->related_cursor >= ls->related_txn_count)
+                    ls->related_cursor = ls->related_txn_count - 1;
+            }
+            return true;
+        case KEY_PPAGE:
+            if (ls->related_txn_count > 0) {
+                ls->related_cursor -= 10;
+                if (ls->related_cursor < 0)
+                    ls->related_cursor = 0;
+            }
+            return true;
+        case '\t':
+        case 27:
+        case '\n':
+            ls->related_focus = false;
+            return true;
+        case 'e':
+            return edit_selected_related_transaction(ls, parent);
+        default:
+            break;
+        }
+    }
 
     switch (ch) {
     case KEY_LEFT:
@@ -2045,6 +2178,8 @@ const char *budget_list_status_hint(const budget_list_state_t *ls) {
         return "q:Quit  Enter:Save  Esc:Cancel  Left/Right:Move cursor";
     if (ls->filter_panel_open)
         return "q:Quit  Up/Down:Navigate  Space/Enter:Toggle category  m:Toggle mode  Esc/f:Close filter";
+    if (ls->related_focus)
+        return "q:Quit  Up/Down:Navigate transactions  e:Edit transaction  Enter/Tab/Esc:Back to categories";
     return "q:Quit  h/l:Month  r:Current month  Up/Down:Navigate  Enter:Show matches  e:Edit budget  f:Filter categories  Esc:Sidebar";
 }
 

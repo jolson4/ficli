@@ -131,9 +131,9 @@ make clean    # clean build artifacts
 - [x] Allow category/subcategory include-exclude toggles for budget calculations, with global mode for excluding selected categories or only including selected categories
 - [x] Show running deficit or surplus in budget view based on this year's actuals vs. expected progress through the current date. We should show a top-level running surplus/deficit number and per-category surplus/deficit numbers in the category list, between the "Budget" and "Net" columns.
 - [x] Update budget to show rows for budgeted categories, then in a lower table, "Unbudgeted Categories" show the remaining transactions (in the UI this should be between the "Budgeted Categories" table and the individual trtansactions table
+- [x] Rename "Run" column in budget view to "Running +/-"
 - [ ] Allow user to specify "This edit to the budget only applies to the current month"
 - [ ] Make edit Category popout larger
-- [ ] Rename "Run" column in budget view to "Running +/-"
 - [ ] Allow user to say if a category is an "Expense" or "Income" category
 - [ ] Don't show "Income" in Credit Card account headers
 - [ ] Support adding a budget for a hidden category in budgets view (since we currenly only show categories matching transactions in the current month)

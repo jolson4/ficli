@@ -329,6 +329,69 @@ static bool txn_list_apply_category_to_selected(txn_list_state_t *ls,
     return updated;
 }
 
+static bool confirm_apply_edit_changes_to_filtered(WINDOW *parent,
+                                                   int filtered_count) {
+    if (!parent || filtered_count <= 1)
+        return false;
+
+    int ph, pw;
+    getmaxyx(parent, ph, pw);
+
+    int win_h = 9;
+    int win_w = 72;
+    if (ph < win_h)
+        win_h = ph;
+    if (pw < win_w)
+        win_w = pw;
+    if (win_h < 6 || win_w < 38)
+        return false;
+
+    int py, px;
+    getbegyx(parent, py, px);
+    int win_y = py + (ph - win_h) / 2;
+    int win_x = px + (pw - win_w) / 2;
+
+    WINDOW *w = newwin(win_h, win_w, win_y, win_x);
+    keypad(w, TRUE);
+    wbkgd(w, COLOR_PAIR(COLOR_FORM));
+    box(w, 0, 0);
+
+    mvwprintw(w, 1, 2, "Apply changed fields to all filtered transactions?");
+    mvwprintw(w, 3, 2, "Filtered rows: %d", filtered_count);
+    mvwprintw(w, 4, 2, "The edited transaction is always saved.");
+    mvwprintw(w, win_h - 2, 2, "y:All filtered  n:Edited only");
+    wrefresh(w);
+
+    bool apply_filtered = false;
+    bool done = false;
+    while (!done) {
+        int ch = wgetch(w);
+        if (ui_requeue_resize_event(ch)) {
+            apply_filtered = false;
+            done = true;
+            continue;
+        }
+
+        switch (ch) {
+        case 'y':
+        case 'Y':
+            apply_filtered = true;
+            done = true;
+            break;
+        case 'n':
+        case 'N':
+        case 27:
+            apply_filtered = false;
+            done = true;
+            break;
+        }
+    }
+
+    delwin(w);
+    touchwin(parent);
+    return apply_filtered;
+}
+
 static bool confirm_delete(WINDOW *parent) {
     int ph, pw;
     getmaxyx(parent, ph, pw);
@@ -1381,10 +1444,19 @@ bool txn_list_handle_input(txn_list_state_t *ls, WINDOW *parent, int ch) {
                         txn_list_compute_edit_changes(
                             &before_txn, &txn, before_to_account_id,
                             to_account_id);
+
+                    bool apply_to_filtered = false;
+                    if (ls->selected_count == 0 && ls->filter_len > 0 &&
+                        ls->display_count > 1 &&
+                        txn_edit_changes_any(&changes)) {
+                        apply_to_filtered =
+                            confirm_apply_edit_changes_to_filtered(
+                                parent, ls->display_count);
+                    }
                     if (ls->selected_count > 0) {
                         txn_list_apply_edit_changes_to_selected(
                             ls, &txn, tmpl_id, &changes, to_account_id);
-                    } else if (ls->filter_len > 0 && ls->display_count > 1) {
+                    } else if (apply_to_filtered) {
                         txn_list_apply_edit_changes_to_filtered(
                             ls, &txn, tmpl_id, &changes, to_account_id);
                     }
@@ -1473,7 +1545,7 @@ const char *txn_list_status_hint(const txn_list_state_t *ls) {
 
     const char *filter_tag = ls->filter_len > 0 ? "/filter[on]" : "/filter";
     const char *edit_tag =
-        (ls->filter_len > 0 && ls->selected_count == 0) ? "e edit(filtered)"
+        (ls->filter_len > 0 && ls->selected_count == 0) ? "e edit(scope)"
                                                         : "e edit";
     if (ls->selected_count > 0) {
         snprintf(buf, sizeof(buf),
