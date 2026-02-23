@@ -13,6 +13,8 @@
 typedef struct {
     budget_row_t row;
     bool is_parent;
+    bool has_running_delta;
+    int64_t running_delta_cents;
 } budget_display_row_t;
 
 typedef struct {
@@ -49,6 +51,8 @@ struct budget_list_state {
     int total_utilization_bps;
     int expected_bps;
     bool has_total_budget;
+    bool has_total_running_delta;
+    int64_t total_running_delta_cents;
 
     budget_filter_row_t *filter_rows;
     int filter_row_count;
@@ -213,6 +217,64 @@ static void compute_total_progress_summary(budget_list_state_t *ls) {
     if (util > INT_MAX)
         util = INT_MAX;
     ls->total_utilization_bps = (int)util;
+}
+
+static int64_t saturating_add_i64(int64_t lhs, int64_t rhs) {
+    if (rhs > 0 && lhs > INT64_MAX - rhs)
+        return INT64_MAX;
+    if (rhs < 0 && lhs < INT64_MIN - rhs)
+        return INT64_MIN;
+    return lhs + rhs;
+}
+
+static int64_t saturating_sub_i64(int64_t lhs, int64_t rhs) {
+    if (rhs == INT64_MIN) {
+        if (lhs >= 0)
+            return INT64_MAX;
+        return lhs - rhs;
+    }
+    return saturating_add_i64(lhs, -rhs);
+}
+
+static void compute_running_delta_summary(budget_list_state_t *ls) {
+    if (!ls)
+        return;
+
+    bool had_error = false;
+    ls->has_total_running_delta = false;
+    ls->total_running_delta_cents = 0;
+
+    for (int i = 0; i < ls->row_count; i++) {
+        budget_display_row_t *drow = &ls->rows[i];
+        drow->has_running_delta = false;
+        drow->running_delta_cents = 0;
+
+        if (!drow->row.has_rule || drow->row.limit_cents <= 0)
+            continue;
+
+        int64_t actual_cents = 0;
+        int64_t expected_cents = 0;
+        if (db_get_budget_running_progress_for_current_year(
+                ls->db, drow->row.category_id, &actual_cents, &expected_cents) < 0) {
+            had_error = true;
+            continue;
+        }
+
+        drow->has_running_delta = true;
+        drow->running_delta_cents =
+            saturating_sub_i64(expected_cents, actual_cents);
+
+        if (!drow->is_parent)
+            continue;
+        if (!ls->has_total_running_delta)
+            ls->has_total_running_delta = true;
+        ls->total_running_delta_cents = saturating_add_i64(
+            ls->total_running_delta_cents, drow->running_delta_cents);
+    }
+
+    if (had_error && ls->message[0] == '\0')
+        snprintf(ls->message, sizeof(ls->message),
+                 "Error loading running surplus/deficit");
 }
 
 static void format_cents_plain(int64_t cents, bool show_plus, char *buf, int n) {
@@ -473,6 +535,7 @@ static void reload_rows(budget_list_state_t *ls) {
     }
 
     free(parents);
+    compute_running_delta_summary(ls);
     compute_total_progress_summary(ls);
 
     if (ls->row_count <= 0) {
@@ -539,6 +602,14 @@ static int row_color_pair(const budget_display_row_t *row) {
     if (util <= 12500)
         return COLOR_WARNING;
     return COLOR_EXPENSE;
+}
+
+static int running_delta_color_pair(int64_t running_delta_cents) {
+    if (running_delta_cents > 0)
+        return COLOR_INCOME;
+    if (running_delta_cents < 0)
+        return COLOR_EXPENSE;
+    return COLOR_NORMAL;
 }
 
 static void draw_bar(WINDOW *win, int row, int col, int width,
@@ -1106,10 +1177,13 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     if (ls->has_total_budget) {
         char spent_str[24];
         char budget_str[24];
+        char running_str[24];
         format_cents_plain(ls->total_spent_cents, false, spent_str,
                            sizeof(spent_str));
         format_cents_plain(ls->total_budget_cents, false, budget_str,
                            sizeof(budget_str));
+        format_cents_plain(ls->total_running_delta_cents, true, running_str,
+                           sizeof(running_str));
 
         int util_whole = ls->total_utilization_bps / 100;
         int util_frac = (ls->total_utilization_bps % 100) / 10;
@@ -1117,10 +1191,18 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
         int expected_frac = (ls->expected_bps % 100) / 10;
 
         char summary[256];
-        snprintf(summary, sizeof(summary),
-                 "Total: %s / %s  %d.%d%%  Expected: %d.%d%%", spent_str,
-                 budget_str, util_whole, util_frac, expected_whole,
-                 expected_frac);
+        if (ls->has_total_running_delta) {
+            snprintf(summary, sizeof(summary),
+                     "Total: %s / %s  %d.%d%%  Expected: %d.%d%%  Running: %s %s",
+                     spent_str, budget_str, util_whole, util_frac, expected_whole,
+                     expected_frac, running_str,
+                     ls->total_running_delta_cents >= 0 ? "surplus" : "deficit");
+        } else {
+            snprintf(summary, sizeof(summary),
+                     "Total: %s / %s  %d.%d%%  Expected: %d.%d%%", spent_str,
+                     budget_str, util_whole, util_frac, expected_whole,
+                     expected_frac);
+        }
         mvwprintw(win, summary_row, left, "%-*.*s", avail, avail, summary);
     } else {
         mvwprintw(win, summary_row, left, "%-*.*s", avail, avail,
@@ -1149,6 +1231,7 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     }
 
     int budget_w = 12;
+    int running_w = 12;
     int net_w = 12;
     int pct_w = 7;
     int min_cat_w = 10;
@@ -1158,26 +1241,28 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
         cat_w = min_cat_w;
     if (cat_w > 28)
         cat_w = 28;
-    int bar_w = avail - cat_w - budget_w - net_w - pct_w - 4;
+    int bar_w = avail - cat_w - budget_w - running_w - net_w - pct_w - 5;
     if (bar_w < min_bar_w) {
         int needed = min_bar_w - bar_w;
         cat_w -= needed;
         if (cat_w < min_cat_w)
             cat_w = min_cat_w;
-        bar_w = avail - cat_w - budget_w - net_w - pct_w - 4;
+        bar_w = avail - cat_w - budget_w - running_w - net_w - pct_w - 5;
     }
     if (bar_w < 0)
         bar_w = 0;
 
     int category_col = left;
     int budget_col = category_col + cat_w + 1;
-    int net_col = budget_col + budget_w + 1;
+    int running_col = budget_col + budget_w + 1;
+    int net_col = running_col + running_w + 1;
     int pct_col = net_col + net_w + 1;
     int bar_col = pct_col + pct_w + 1;
 
     wattron(win, A_BOLD);
     mvwprintw(win, header_row, category_col, "%-*s", cat_w, "Category");
     mvwprintw(win, header_row, budget_col, "%-*s", budget_w, "Budget");
+    mvwprintw(win, header_row, running_col, "%-*s", running_w, "Run");
     mvwprintw(win, header_row, net_col, "%-*s", net_w, "Net");
     mvwprintw(win, header_row, pct_col, "%-*s", pct_w, "%");
     if (bar_w > 0)
@@ -1269,6 +1354,22 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
             } else {
                 wattron(win, A_DIM);
                 mvwprintw(win, row, budget_col, "%*s", budget_w, "--");
+                wattroff(win, A_DIM);
+            }
+
+            if (drow->has_running_delta) {
+                char running_str[24];
+                format_cents_plain(drow->running_delta_cents, true, running_str,
+                                   sizeof(running_str));
+                wattron(win, COLOR_PAIR(running_delta_color_pair(
+                                 drow->running_delta_cents)));
+                mvwprintw(win, row, running_col, "%*.*s", running_w, running_w,
+                          running_str);
+                wattroff(win, COLOR_PAIR(running_delta_color_pair(
+                                  drow->running_delta_cents)));
+            } else {
+                wattron(win, A_DIM);
+                mvwprintw(win, row, running_col, "%*s", running_w, "--");
                 wattroff(win, A_DIM);
             }
 

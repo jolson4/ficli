@@ -2716,6 +2716,134 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
     return count;
 }
 
+int db_get_budget_running_progress_for_current_year(sqlite3 *db,
+                                                    int64_t category_id,
+                                                    int64_t *out_actual_cents,
+                                                    int64_t *out_expected_cents) {
+    if (!out_actual_cents || !out_expected_cents || category_id <= 0)
+        return -1;
+    *out_actual_cents = 0;
+    *out_expected_cents = 0;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "WITH RECURSIVE"
+        " descendants(category_id) AS ("
+        "   SELECT ?"
+        "   UNION ALL"
+        "   SELECT c.id"
+        "   FROM categories c"
+        "   JOIN descendants d ON c.parent_id = d.category_id"
+        " ),"
+        " selected_descendants(category_id) AS ("
+        "   SELECT category_id FROM budget_category_filters"
+        "   UNION"
+        "   SELECT c.id FROM categories c"
+        "   JOIN selected_descendants sd ON c.parent_id = sd.category_id"
+        " ),"
+        " filter_mode(include_selected) AS ("
+        "   SELECT CASE"
+        "     WHEN EXISTS("
+        "       SELECT 1 FROM budget_filter_settings bfs"
+        "       WHERE bfs.id = 1 AND bfs.mode = 'INCLUDE_SELECTED'"
+        "     ) THEN 1 ELSE 0 END"
+        " ),"
+        " allowed_categories(category_id) AS ("
+        "   SELECT c.id"
+        "   FROM categories c"
+        "   CROSS JOIN filter_mode fm"
+        "   WHERE (fm.include_selected = 0"
+        "          AND c.id NOT IN (SELECT category_id FROM selected_descendants))"
+        "      OR (fm.include_selected = 1"
+        "          AND c.id IN (SELECT category_id FROM selected_descendants))"
+        " ),"
+        " current_ctx(current_date, year_start, current_month, day_of_month) AS ("
+        "   SELECT date('now', 'localtime'),"
+        "          date(strftime('%Y-01-01', 'now', 'localtime')),"
+        "          strftime('%Y-%m', 'now', 'localtime'),"
+        "          CAST(strftime('%d', 'now', 'localtime') AS INTEGER)"
+        " ),"
+        " months(month_ym) AS ("
+        "   SELECT strftime('%Y-01', current_date) FROM current_ctx"
+        "   UNION ALL"
+        "   SELECT strftime('%Y-%m', date(month_ym || '-01', '+1 month'))"
+        "   FROM months"
+        "   WHERE month_ym < (SELECT current_month FROM current_ctx)"
+        " ),"
+        " expected_progress AS ("
+        "   SELECT COALESCE(SUM(("
+        "     COALESCE(("
+        "       SELECT b.limit_cents"
+        "       FROM budgets b"
+        "       WHERE b.category_id = ?"
+        "         AND b.month <= m.month_ym"
+        "       ORDER BY b.month DESC"
+        "       LIMIT 1"
+        "     ), 0) *"
+        "     CASE"
+        "       WHEN m.month_ym < (SELECT current_month FROM current_ctx)"
+        "         THEN 10000"
+        "       ELSE ("
+        "         (SELECT day_of_month FROM current_ctx) * 10000 /"
+        "         CAST(strftime('%d', date(m.month_ym || '-01', '+1 month', '-1 day')) AS INTEGER)"
+        "       )"
+        "     END"
+        "   ) / 10000), 0) AS expected_cents"
+        "   FROM months m"
+        " ),"
+        " actual_progress AS ("
+        "   SELECT COALESCE(SUM(CASE"
+        "     WHEN t.type = 'EXPENSE' THEN t.amount_cents"
+        "     WHEN t.type = 'INCOME' THEN -t.amount_cents"
+        "     ELSE 0"
+        "   END), 0) AS actual_cents"
+        "   FROM transactions t"
+        "   JOIN descendants d ON d.category_id = t.category_id"
+        "   JOIN allowed_categories ac ON ac.category_id = t.category_id"
+        "   JOIN current_ctx cc"
+        "   WHERE t.type IN ('EXPENSE', 'INCOME')"
+        "     AND COALESCE(t.reflection_date, t.date) >= cc.year_start"
+        "     AND COALESCE(t.reflection_date, t.date) <= cc.current_date"
+        " )"
+        " SELECT ap.actual_cents, ep.expected_cents"
+        " FROM actual_progress ap"
+        " CROSS JOIN expected_progress ep",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr,
+                "db_get_budget_running_progress_for_current_year prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, category_id);
+    sqlite3_bind_int64(stmt, 2, category_id);
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr,
+                "db_get_budget_running_progress_for_current_year step: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    *out_actual_cents = sqlite3_column_int64(stmt, 0);
+    *out_expected_cents = sqlite3_column_int64(stmt, 1);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr,
+                "db_get_budget_running_progress_for_current_year finalize: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
 int db_set_budget_effective(sqlite3 *db, int64_t category_id,
                             const char *effective_month_ym,
                             int64_t limit_cents) {
