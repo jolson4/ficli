@@ -128,6 +128,9 @@ make clean    # clean build artifacts
 - [x] Allow uncategorizing transactions in `e` or `c` mode ([plan](../.claude/plans/uncategorize-transaction-edit.md))
 - [x] Allow mass-renaming payee after filtering transactions list ([plan](../.claude/plans/mass-rename-payee-filtered-list.md))
 - [x] Make QIF import include categorization. Prompt user to create new category, assign to other category, or leave uncategorized when QIF transaction has a category that doesn't exist in the app yet. (Also applies category fields from CSV imports.) ([plan](../.claude/plans/import-category-qif-csv.md))
+- [ ] Allow excluding transactions from specific categories from budget calculations, e.g. donations to charity
+- [ ] Show running deficit or surplus in budget view based on this year's actuals vs. expected progress through the current date
+- [ ] Support adding a budget for a hidden category in budgets view (since we currenly only show categories matching transactions in the current month)
 - [ ] Add CLI arguments for quick actions (e.g., `ficli import -account "CapitalOne" -file ~/Downloads/transactions.csv`)
 - [ ] Allow user to focus and edit transactions in budget view
 - [ ] Allow annual budget for categories with monthly breakdowns
