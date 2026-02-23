@@ -148,9 +148,12 @@ typedef struct {
     int64_t parent_category_id; // 0 for top-level categories
     char category_name[64];
     int child_count; // direct children
+    int txn_count;   // matching EXPENSE/INCOME txns in view month subtree
     int64_t net_spent_cents;
-    int64_t limit_cents;
-    bool has_rule;
+    int64_t direct_limit_cents;
+    int64_t limit_cents; // roll-up limit (direct + descendants)
+    bool has_rule;       // direct budget rule exists on this category
+    bool has_rollup_rule; // any budget rule exists in this category subtree
     int utilization_bps;
 } budget_row_t;
 

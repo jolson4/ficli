@@ -129,8 +129,11 @@ static bool category_names_equivalent(const char *a, const char *b) {
     return na[0] != '\0' && strcmp(na, nb) == 0;
 }
 
-static category_type_t category_type_for_transaction(transaction_type_t type) {
-    return type == TRANSACTION_INCOME ? CATEGORY_INCOME : CATEGORY_EXPENSE;
+static category_type_t category_type_for_import_label(transaction_type_t type,
+                                                      const char *name) {
+    if (type == TRANSACTION_INCOME && category_names_equivalent(name, "Salary"))
+        return CATEGORY_INCOME;
+    return CATEGORY_EXPENSE;
 }
 
 static int64_t find_category_id_by_name(const category_t *categories,
@@ -465,10 +468,12 @@ static int apply_import_categories(WINDOW *parent, sqlite3 *db,
         if (cached)
             continue;
 
+        category_type_t ctype =
+            category_type_for_import_label(row->type, row->category);
         category_t *typed_categories =
-            (row->type == TRANSACTION_INCOME) ? income_categories : expense_categories;
+            (ctype == CATEGORY_INCOME) ? income_categories : expense_categories;
         int typed_count =
-            (row->type == TRANSACTION_INCOME) ? income_count : expense_count;
+            (ctype == CATEGORY_INCOME) ? income_count : expense_count;
 
         int64_t resolved_id =
             find_category_id_by_name(typed_categories, typed_count, row->category);
@@ -500,7 +505,6 @@ static int apply_import_categories(WINDOW *parent, sqlite3 *db,
                     continue;
                 }
 
-                category_type_t ctype = category_type_for_transaction(row->type);
                 int64_t created_id =
                     create_category_from_import_label(db, ctype, row->category);
                 if (created_id <= 0) {

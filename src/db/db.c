@@ -177,10 +177,7 @@ static int seed_defaults(sqlite3 *db) {
         "    ('Healthcare', 'EXPENSE', NULL),"
         "    ('Shopping', 'EXPENSE', NULL),"
         "    ('Other Expense', 'EXPENSE', NULL),"
-        "    ('Salary', 'INCOME', NULL),"
-        "    ('Freelance', 'INCOME', NULL),"
-        "    ('Investments', 'INCOME', NULL),"
-        "    ('Other Income', 'INCOME', NULL);";
+        "    ('Salary', 'INCOME', NULL);";
 
     return exec_sql(db, seed_sql);
 }

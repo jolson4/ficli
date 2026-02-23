@@ -270,13 +270,50 @@ static void form_load_categories(form_state_t *fs) {
     if (fs->txn_type == TRANSACTION_TRANSFER)
         return;
 
-    category_type_t ctype = (fs->txn_type == TRANSACTION_INCOME)
-                                ? CATEGORY_INCOME
-                                : CATEGORY_EXPENSE;
-    int count = db_get_categories(fs->db, ctype, &fs->categories);
-    if (count > 0) {
-        fs->category_count = count;
+    if (fs->txn_type != TRANSACTION_INCOME) {
+        int count = db_get_categories(fs->db, CATEGORY_EXPENSE, &fs->categories);
+        if (count > 0)
+            fs->category_count = count;
+        return;
     }
+
+    category_t *expense = NULL;
+    category_t *income = NULL;
+    int expense_count = db_get_categories(fs->db, CATEGORY_EXPENSE, &expense);
+    int income_count = db_get_categories(fs->db, CATEGORY_INCOME, &income);
+    if (expense_count < 0 || income_count < 0) {
+        free(expense);
+        free(income);
+        return;
+    }
+
+    int total = 0;
+    if (expense_count > 0)
+        total += expense_count;
+    if (income_count > 0)
+        total += income_count;
+    if (total <= 0) {
+        free(expense);
+        free(income);
+        return;
+    }
+
+    fs->categories = malloc((size_t)total * sizeof(category_t));
+    if (!fs->categories) {
+        free(expense);
+        free(income);
+        return;
+    }
+
+    int idx = 0;
+    for (int i = 0; i < expense_count; i++)
+        fs->categories[idx++] = expense[i];
+    for (int i = 0; i < income_count; i++)
+        fs->categories[idx++] = income[i];
+    fs->category_count = idx;
+
+    free(expense);
+    free(income);
 }
 
 static void form_select_default_category(form_state_t *fs) {
@@ -1010,9 +1047,7 @@ static bool form_create_category_on_the_fly(WINDOW *parent, form_state_t *fs) {
     if (!fs || fs->txn_type == TRANSACTION_TRANSFER)
         return false;
 
-    category_type_t ctype = (fs->txn_type == TRANSACTION_INCOME)
-                                ? CATEGORY_INCOME
-                                : CATEGORY_EXPENSE;
+    category_type_t ctype = CATEGORY_EXPENSE;
     char input[64];
     if (!prompt_category_path(parent, ctype, input, sizeof(input)))
         return false;

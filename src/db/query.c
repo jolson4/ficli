@@ -212,7 +212,7 @@ static void compute_budget_utilization(budget_row_t *row) {
     if (!row)
         return;
 
-    if (!row->has_rule || row->limit_cents <= 0) {
+    if (!row->has_rollup_rule || row->limit_cents <= 0) {
         row->utilization_bps = -1;
         return;
     }
@@ -2442,13 +2442,14 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "   JOIN allowed_categories ac ON ac.category_id = d.category_id"
         "   GROUP BY d.parent_id"
         " ),"
-        " monthly_net AS ("
+        " monthly_stats AS ("
         "   SELECT d.parent_id,"
         "          COALESCE(SUM(CASE"
         "            WHEN t.type = 'EXPENSE' THEN t.amount_cents"
         "            WHEN t.type = 'INCOME' THEN -t.amount_cents"
         "            ELSE 0"
-        "          END), 0) AS net_spent_cents"
+        "          END), 0) AS net_spent_cents,"
+        "          COUNT(t.id) AS txn_count"
         "   FROM descendants d"
         "   LEFT JOIN transactions t"
         "     ON t.category_id = d.category_id"
@@ -2469,31 +2470,47 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "            JOIN allowed_categories ac ON ac.category_id = dd.category_id"
         "            JOIN budgets b2 ON b2.category_id = dd.category_id"
         "            WHERE dd.parent_id = p.id AND b2.month <= ?"
-        "          ) AS subtree_has_rule,"
+        "          ) AS has_rollup_rule,"
         "          ("
-        "            SELECT b3.limit_cents"
-        "            FROM budgets b3"
-        "            WHERE b3.category_id = p.id AND b3.month <= ?"
-        "            ORDER BY b3.month DESC"
-        "            LIMIT 1"
-        "          ) AS limit_cents,"
+            "            SELECT b3.limit_cents"
+            "            FROM budgets b3"
+            "            WHERE b3.category_id = p.id AND b3.month <= ?"
+            "            ORDER BY b3.month DESC"
+            "            LIMIT 1"
+        "          ) AS direct_limit_cents,"
+        "          ("
+        "            SELECT COALESCE(SUM(COALESCE(("
+        "              SELECT b4.limit_cents"
+        "              FROM budgets b4"
+        "              WHERE b4.category_id = dd2.category_id"
+        "                AND b4.month <= ?"
+        "              ORDER BY b4.month DESC"
+        "              LIMIT 1"
+        "            ), 0)), 0)"
+        "            FROM descendants dd2"
+        "            JOIN allowed_categories ac2 ON ac2.category_id = dd2.category_id"
+        "            WHERE dd2.parent_id = p.id"
+        "          ) AS rollup_limit_cents,"
         "          ("
         "            SELECT COUNT(*) FROM categories c WHERE c.parent_id = p.id"
         "          ) AS child_count"
         "   FROM parents p"
         " )"
         " SELECT p.id, p.name, f.child_count,"
-        "        COALESCE(mn.net_spent_cents, 0),"
-        "        COALESCE(f.limit_cents, 0),"
-        "        f.has_rule"
+        "        COALESCE(ms.net_spent_cents, 0),"
+        "        COALESCE(ms.txn_count, 0),"
+        "        COALESCE(f.direct_limit_cents, 0),"
+        "        COALESCE(f.rollup_limit_cents, 0),"
+        "        f.has_rule,"
+        "        f.has_rollup_rule"
         " FROM parents p"
         " JOIN flags f ON f.parent_id = p.id"
         " JOIN allowed_descendant_counts adc ON adc.parent_id = p.id"
-        " LEFT JOIN monthly_net mn ON mn.parent_id = p.id"
+        " LEFT JOIN monthly_stats ms ON ms.parent_id = p.id"
         " WHERE adc.allowed_count > 0"
         "   AND (f.has_rule = 1"
-        "        OR f.subtree_has_rule = 1"
-        "        OR COALESCE(mn.net_spent_cents, 0) != 0)"
+        "        OR f.has_rollup_rule = 1"
+        "        OR COALESCE(ms.txn_count, 0) > 0)"
         " ORDER BY p.name",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -2506,6 +2523,7 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
     sqlite3_bind_text(stmt, 2, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, norm_month, -1, SQLITE_TRANSIENT);
 
     int capacity = 16;
     int count = 0;
@@ -2535,8 +2553,11 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
                  "%s", name ? name : "");
         list[count].child_count = sqlite3_column_int(stmt, 2);
         list[count].net_spent_cents = sqlite3_column_int64(stmt, 3);
-        list[count].limit_cents = sqlite3_column_int64(stmt, 4);
-        list[count].has_rule = sqlite3_column_int(stmt, 5) != 0;
+        list[count].txn_count = sqlite3_column_int(stmt, 4);
+        list[count].direct_limit_cents = sqlite3_column_int64(stmt, 5);
+        list[count].limit_cents = sqlite3_column_int64(stmt, 6);
+        list[count].has_rule = sqlite3_column_int(stmt, 7) != 0;
+        list[count].has_rollup_rule = sqlite3_column_int(stmt, 8) != 0;
         list[count].parent_category_id = 0;
         compute_budget_utilization(&list[count]);
         count++;
@@ -2611,13 +2632,14 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "   JOIN allowed_categories ac ON ac.category_id = d.category_id"
         "   GROUP BY d.root_id"
         " ),"
-        " monthly_net AS ("
+        " monthly_stats AS ("
         "   SELECT d.root_id,"
         "          COALESCE(SUM(CASE"
         "            WHEN t.type = 'EXPENSE' THEN t.amount_cents"
         "            WHEN t.type = 'INCOME' THEN -t.amount_cents"
         "            ELSE 0"
-        "          END), 0) AS net_spent_cents"
+        "          END), 0) AS net_spent_cents,"
+        "          COUNT(t.id) AS txn_count"
         "   FROM descendants d"
         "   LEFT JOIN transactions t"
         "     ON t.category_id = d.category_id"
@@ -2628,22 +2650,43 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         " )"
         " SELECT r.id, r.name,"
         "        (SELECT COUNT(*) FROM categories c WHERE c.parent_id = r.id),"
-        "        COALESCE(mn.net_spent_cents, 0),"
+        "        COALESCE(ms.net_spent_cents, 0),"
+        "        COALESCE(ms.txn_count, 0),"
         "        COALESCE(("
         "          SELECT b.limit_cents FROM budgets b"
         "          WHERE b.category_id = r.id AND b.month <= ?"
         "          ORDER BY b.month DESC"
         "          LIMIT 1"
         "        ), 0),"
+        "        ("
+        "          SELECT COALESCE(SUM(COALESCE(("
+        "            SELECT b4.limit_cents"
+        "            FROM budgets b4"
+        "            WHERE b4.category_id = dd2.category_id"
+        "              AND b4.month <= ?"
+        "            ORDER BY b4.month DESC"
+        "            LIMIT 1"
+        "          ), 0)), 0)"
+        "          FROM descendants dd2"
+        "          JOIN allowed_categories ac2 ON ac2.category_id = dd2.category_id"
+        "          WHERE dd2.root_id = r.id"
+        "        ),"
         "        EXISTS("
         "          SELECT 1 FROM budgets b2"
         "          WHERE b2.category_id = r.id AND b2.month <= ?"
+        "        ),"
+        "        EXISTS("
+        "          SELECT 1"
+        "          FROM descendants dd"
+        "          JOIN allowed_categories ac ON ac.category_id = dd.category_id"
+        "          JOIN budgets b3 ON b3.category_id = dd.category_id"
+        "          WHERE dd.root_id = r.id AND b3.month <= ?"
         "        )"
         " FROM roots r"
         " JOIN allowed_descendant_counts adc ON adc.root_id = r.id"
-        " LEFT JOIN monthly_net mn ON mn.root_id = r.id"
+        " LEFT JOIN monthly_stats ms ON ms.root_id = r.id"
         " WHERE adc.allowed_count > 0"
-        "   AND (COALESCE(mn.net_spent_cents, 0) != 0"
+        "   AND (COALESCE(ms.txn_count, 0) > 0"
         "        OR EXISTS("
         "          SELECT 1"
         "          FROM descendants dd"
@@ -2664,6 +2707,8 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
     sqlite3_bind_text(stmt, 3, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, norm_month, -1, SQLITE_TRANSIENT);
 
     int capacity = 8;
     int count = 0;
@@ -2693,8 +2738,11 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
                  "%s", name ? name : "");
         list[count].child_count = sqlite3_column_int(stmt, 2);
         list[count].net_spent_cents = sqlite3_column_int64(stmt, 3);
-        list[count].limit_cents = sqlite3_column_int64(stmt, 4);
-        list[count].has_rule = sqlite3_column_int(stmt, 5) != 0;
+        list[count].txn_count = sqlite3_column_int(stmt, 4);
+        list[count].direct_limit_cents = sqlite3_column_int64(stmt, 5);
+        list[count].limit_cents = sqlite3_column_int64(stmt, 6);
+        list[count].has_rule = sqlite3_column_int(stmt, 7) != 0;
+        list[count].has_rollup_rule = sqlite3_column_int(stmt, 8) != 0;
         list[count].parent_category_id = parent_category_id;
         compute_budget_utilization(&list[count]);
         count++;
@@ -2773,14 +2821,18 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
         " ),"
         " expected_progress AS ("
         "   SELECT COALESCE(SUM(("
-        "     COALESCE(("
-        "       SELECT b.limit_cents"
-        "       FROM budgets b"
-        "       WHERE b.category_id = ?"
-        "         AND b.month <= m.month_ym"
-        "       ORDER BY b.month DESC"
-        "       LIMIT 1"
-        "     ), 0) *"
+        "     ("
+        "       SELECT COALESCE(SUM(COALESCE(("
+        "         SELECT b.limit_cents"
+        "         FROM budgets b"
+        "         WHERE b.category_id = d.category_id"
+        "           AND b.month <= m.month_ym"
+        "         ORDER BY b.month DESC"
+        "         LIMIT 1"
+        "       ), 0)), 0)"
+        "       FROM descendants d"
+        "       JOIN allowed_categories ac ON ac.category_id = d.category_id"
+        "     ) *"
         "     CASE"
         "       WHEN m.month_ym < (SELECT current_month FROM current_ctx)"
         "         THEN 10000"
@@ -2818,7 +2870,6 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
     }
 
     sqlite3_bind_int64(stmt, 1, category_id);
-    sqlite3_bind_int64(stmt, 2, category_id);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
