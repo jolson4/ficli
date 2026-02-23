@@ -126,7 +126,10 @@ static const help_row_t help_rows[] = {
     {"r", "Jump to current month"},
     {"Enter", "Show matching transactions"},
     {"e", "Edit selected parent budget"},
-    {"Esc", "Cancel inline edit"},
+    {"f", "Open category filter panel"},
+    {"Space / Enter (filter)", "Toggle selected category"},
+    {"m (filter)", "Toggle include/exclude mode"},
+    {"Esc", "Cancel inline edit / close filter"},
 };
 
 #define HELP_ROW_COUNT ((int)(sizeof(help_rows) / sizeof(help_rows[0])))

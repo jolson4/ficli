@@ -15,6 +15,11 @@ typedef struct {
     bool is_parent;
 } budget_display_row_t;
 
+typedef struct {
+    budget_filter_category_t category;
+    bool selected;
+} budget_filter_row_t;
+
 struct budget_list_state {
     sqlite3 *db;
     char month[8]; // "YYYY-MM"
@@ -44,6 +49,14 @@ struct budget_list_state {
     int total_utilization_bps;
     int expected_bps;
     bool has_total_budget;
+
+    budget_filter_row_t *filter_rows;
+    int filter_row_count;
+    int filter_row_capacity;
+    bool filter_panel_open;
+    int filter_cursor;
+    int filter_scroll;
+    budget_category_filter_mode_t filter_mode;
 };
 
 static void set_current_month(char out[8]) {
@@ -310,6 +323,85 @@ static int append_row(budget_list_state_t *ls, const budget_row_t *row,
     return 0;
 }
 
+static void clear_filter_rows(budget_list_state_t *ls) {
+    if (!ls)
+        return;
+    free(ls->filter_rows);
+    ls->filter_rows = NULL;
+    ls->filter_row_count = 0;
+    ls->filter_row_capacity = 0;
+    ls->filter_cursor = 0;
+    ls->filter_scroll = 0;
+}
+
+static bool selected_ids_contains(const int64_t *ids, int count, int64_t id) {
+    if (!ids || count <= 0 || id <= 0)
+        return false;
+    for (int i = 0; i < count; i++) {
+        if (ids[i] == id)
+            return true;
+    }
+    return false;
+}
+
+static int reload_filter_rows(budget_list_state_t *ls) {
+    if (!ls)
+        return -1;
+
+    clear_filter_rows(ls);
+
+    budget_category_filter_mode_t mode = BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED;
+    if (db_get_budget_category_filter_mode(ls->db, &mode) < 0)
+        return -1;
+    ls->filter_mode = mode;
+
+    budget_filter_category_t *categories = NULL;
+    int category_count = db_get_budget_filter_categories(ls->db, &categories);
+    if (category_count < 0)
+        return -1;
+
+    int64_t *selected_ids = NULL;
+    int selected_count =
+        db_get_budget_category_filter_selected(ls->db, &selected_ids);
+    if (selected_count < 0) {
+        free(categories);
+        return -1;
+    }
+
+    if (category_count > 0) {
+        ls->filter_rows = calloc((size_t)category_count, sizeof(*ls->filter_rows));
+        if (!ls->filter_rows) {
+            free(categories);
+            free(selected_ids);
+            return -1;
+        }
+        ls->filter_row_capacity = category_count;
+        for (int i = 0; i < category_count; i++) {
+            ls->filter_rows[i].category = categories[i];
+            ls->filter_rows[i].selected = selected_ids_contains(
+                selected_ids, selected_count, categories[i].id);
+        }
+        ls->filter_row_count = category_count;
+    }
+
+    free(categories);
+    free(selected_ids);
+    if (ls->filter_cursor >= ls->filter_row_count)
+        ls->filter_cursor = ls->filter_row_count > 0 ? ls->filter_row_count - 1 : 0;
+    if (ls->filter_cursor < 0)
+        ls->filter_cursor = 0;
+    if (ls->filter_scroll < 0)
+        ls->filter_scroll = 0;
+    return 0;
+}
+
+static const char *
+filter_mode_label(budget_category_filter_mode_t mode) {
+    return (mode == BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED)
+               ? "Only include selected categories"
+               : "Exclude selected categories";
+}
+
 static void clear_related_transactions(budget_list_state_t *ls) {
     if (!ls)
         return;
@@ -393,15 +485,24 @@ static void reload_rows(budget_list_state_t *ls) {
     }
 
     if (ls->related_visible && ls->related_category_id > 0) {
+        bool found_related_category = false;
         for (int i = 0; i < ls->row_count; i++) {
             if (ls->rows[i].row.category_id == ls->related_category_id) {
                 snprintf(ls->related_category_name,
                          sizeof(ls->related_category_name), "%s",
                          ls->rows[i].row.category_name);
+                found_related_category = true;
                 break;
             }
         }
-        refresh_related_transactions(ls);
+        if (found_related_category) {
+            refresh_related_transactions(ls);
+        } else {
+            clear_related_transactions(ls);
+            ls->related_visible = false;
+            ls->related_category_id = 0;
+            ls->related_category_name[0] = '\0';
+        }
     }
 
     ls->dirty = false;
@@ -413,6 +514,7 @@ budget_list_state_t *budget_list_create(sqlite3 *db) {
         return NULL;
     ls->db = db;
     set_current_month(ls->month);
+    ls->filter_mode = BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED;
     ls->dirty = true;
     return ls;
 }
@@ -422,6 +524,7 @@ void budget_list_destroy(budget_list_state_t *ls) {
         return;
     free(ls->rows);
     clear_related_transactions(ls);
+    clear_filter_rows(ls);
     free(ls);
 }
 
@@ -655,6 +758,132 @@ static void draw_expected_marker_label(WINDOW *win, int row, int col, int width,
     wattroff(win, COLOR_PAIR(COLOR_INFO));
 }
 
+static const char *category_type_short(category_type_t type) {
+    return (type == CATEGORY_INCOME) ? "Inc" : "Exp";
+}
+
+static void draw_filter_panel_box(WINDOW *win, int top, int left, int height,
+                                  int width) {
+    if (!win || height < 3 || width < 3)
+        return;
+    int bottom = top + height - 1;
+    int right = left + width - 1;
+
+    for (int r = top; r <= bottom; r++)
+        mvwprintw(win, r, left, "%-*s", width, "");
+    for (int c = left + 1; c < right; c++) {
+        mvwaddch(win, top, c, ACS_HLINE);
+        mvwaddch(win, bottom, c, ACS_HLINE);
+    }
+    for (int r = top + 1; r < bottom; r++) {
+        mvwaddch(win, r, left, ACS_VLINE);
+        mvwaddch(win, r, right, ACS_VLINE);
+    }
+    mvwaddch(win, top, left, ACS_ULCORNER);
+    mvwaddch(win, top, right, ACS_URCORNER);
+    mvwaddch(win, bottom, left, ACS_LLCORNER);
+    mvwaddch(win, bottom, right, ACS_LRCORNER);
+}
+
+static void draw_filter_panel(budget_list_state_t *ls, WINDOW *win) {
+    if (!ls || !win || !ls->filter_panel_open)
+        return;
+
+    int h, w;
+    getmaxyx(win, h, w);
+    int panel_h = h - 4;
+    int panel_w = w - 8;
+    if (panel_h > 24)
+        panel_h = 24;
+    if (panel_w > 84)
+        panel_w = 84;
+    if (panel_h < 12 || panel_w < 38)
+        return;
+
+    int top = (h - panel_h) / 2;
+    int left = (w - panel_w) / 2;
+    int right = left + panel_w - 1;
+    int bottom = top + panel_h - 1;
+
+    // Keep all panel content on the modal color pair so text rows do not
+    // punch through with the underlying screen background.
+    wattron(win, COLOR_PAIR(COLOR_FORM));
+    draw_filter_panel_box(win, top, left, panel_h, panel_w);
+
+    wattron(win, A_BOLD);
+    mvwprintw(win, top + 1, left + 2, "Budget Category Filter");
+    wattroff(win, A_BOLD);
+
+    const char *mode = filter_mode_label(ls->filter_mode);
+    mvwprintw(win, top + 2, left + 2, "Mode: %s", mode);
+    wattron(win, A_DIM);
+    mvwprintw(win, top + 3, left + 2,
+              "m:toggle mode  Space/Enter:toggle category");
+    wattroff(win, A_DIM);
+
+    int list_top = top + 5;
+    int list_bottom = bottom - 3;
+    int list_rows = list_bottom - list_top + 1;
+    if (list_rows < 1)
+        list_rows = 1;
+    int list_w = panel_w - 4;
+    if (list_w < 1)
+        list_w = 1;
+
+    if (ls->filter_cursor < ls->filter_scroll)
+        ls->filter_scroll = ls->filter_cursor;
+    if (ls->filter_cursor >= ls->filter_scroll + list_rows)
+        ls->filter_scroll = ls->filter_cursor - list_rows + 1;
+    if (ls->filter_scroll < 0)
+        ls->filter_scroll = 0;
+
+    if (ls->filter_row_count <= 0) {
+        wattron(win, A_DIM);
+        mvwprintw(win, list_top, left + 2, "No categories available");
+        wattroff(win, A_DIM);
+    } else {
+        for (int i = 0; i < list_rows; i++) {
+            int idx = ls->filter_scroll + i;
+            int row = list_top + i;
+            mvwprintw(win, row, left + 2, "%-*s", list_w, "");
+            if (idx >= ls->filter_row_count)
+                continue;
+
+            bool selected_row = (idx == ls->filter_cursor);
+            if (selected_row)
+                wattron(win, A_REVERSE);
+
+            const budget_filter_row_t *frow = &ls->filter_rows[idx];
+            const char *mark = frow->selected ? "x" : " ";
+            if (frow->category.parent_id > 0) {
+                char label[128];
+                snprintf(label, sizeof(label), "[%s]   - %s", mark,
+                         frow->category.name);
+                mvwprintw(win, row, left + 2, "%-*.*s", list_w, list_w, label);
+            } else {
+                char label[128];
+                snprintf(label, sizeof(label), "[%s] [%s] %s", mark,
+                         category_type_short(frow->category.type),
+                         frow->category.name);
+                mvwprintw(win, row, left + 2, "%-*.*s", list_w, list_w, label);
+            }
+
+            if (selected_row)
+                wattroff(win, A_REVERSE);
+        }
+    }
+
+    if (ls->filter_scroll > 0)
+        mvwaddch(win, list_top, right - 1, ACS_UARROW);
+    if (ls->filter_scroll + list_rows < ls->filter_row_count)
+        mvwaddch(win, list_bottom, right - 1, ACS_DARROW);
+
+    wattron(win, A_DIM);
+    mvwprintw(win, bottom - 1, left + 2, "Esc/f:close");
+    wattroff(win, A_DIM);
+    wattroff(win, COLOR_PAIR(COLOR_FORM));
+}
+
 static void format_related_amount(const budget_txn_row_t *txn, char *buf, int n) {
     if (!txn || !buf || n <= 0)
         return;
@@ -851,8 +1080,14 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     int data_row_start = 12;
 
     mvwprintw(win, title_row, 2, "Budgets  Month:%s", ls->month);
-    const char *title_hint = ls->edit_mode ? "Enter:Save Esc:Cancel"
-                                           : "h/l:Month  r:Now  Enter:Txns  e:Edit";
+    const char *title_hint = NULL;
+    if (ls->filter_panel_open) {
+        title_hint = "Esc/f:Close filter  m:Mode  Space:Toggle";
+    } else if (ls->edit_mode) {
+        title_hint = "Enter:Save Esc:Cancel";
+    } else {
+        title_hint = "h/l:Month  r:Now  Enter:Txns  e:Edit  f:Filter";
+    }
     int title_hint_col = w - 2 - (int)strlen(title_hint);
     if (title_hint_col < 2)
         title_hint_col = 2;
@@ -1099,6 +1334,12 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
             related_visible_rows);
     }
 
+    if (ls->filter_panel_open) {
+        draw_filter_panel(ls, win);
+        curs_set(0);
+        return;
+    }
+
     if (ls->edit_mode && focused && ls->row_count > 0 && ls->cursor >= 0 &&
         ls->cursor < ls->row_count && ls->rows[ls->cursor].is_parent) {
         int on_screen = ls->cursor - ls->scroll_offset;
@@ -1133,6 +1374,94 @@ static void begin_inline_edit(budget_list_state_t *ls) {
     else
         ls->edit_buf[0] = '\0';
     ls->edit_pos = (int)strlen(ls->edit_buf);
+}
+
+static void open_filter_panel(budget_list_state_t *ls) {
+    if (!ls)
+        return;
+    if (reload_filter_rows(ls) < 0) {
+        snprintf(ls->message, sizeof(ls->message), "Error loading category filters");
+        return;
+    }
+    ls->filter_panel_open = true;
+}
+
+static bool handle_filter_panel_key(budget_list_state_t *ls, int ch) {
+    if (!ls || !ls->filter_panel_open)
+        return false;
+
+    switch (ch) {
+    case 27:
+    case 'f':
+        ls->filter_panel_open = false;
+        return true;
+    case KEY_UP:
+    case 'k':
+        if (ls->filter_row_count > 0 && ls->filter_cursor > 0)
+            ls->filter_cursor--;
+        return true;
+    case KEY_DOWN:
+    case 'j':
+        if (ls->filter_row_count > 0 && ls->filter_cursor < ls->filter_row_count - 1)
+            ls->filter_cursor++;
+        return true;
+    case KEY_HOME:
+    case 'g':
+        ls->filter_cursor = 0;
+        return true;
+    case KEY_END:
+    case 'G':
+        if (ls->filter_row_count > 0)
+            ls->filter_cursor = ls->filter_row_count - 1;
+        return true;
+    case KEY_NPAGE:
+        if (ls->filter_row_count > 0) {
+            ls->filter_cursor += 8;
+            if (ls->filter_cursor >= ls->filter_row_count)
+                ls->filter_cursor = ls->filter_row_count - 1;
+        }
+        return true;
+    case KEY_PPAGE:
+        if (ls->filter_row_count > 0) {
+            ls->filter_cursor -= 8;
+            if (ls->filter_cursor < 0)
+                ls->filter_cursor = 0;
+        }
+        return true;
+    case 'm': {
+        budget_category_filter_mode_t next_mode =
+            (ls->filter_mode == BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED)
+                ? BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED
+                : BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED;
+        if (db_set_budget_category_filter_mode(ls->db, next_mode) < 0) {
+            snprintf(ls->message, sizeof(ls->message), "Error saving filter mode");
+            return true;
+        }
+        ls->filter_mode = next_mode;
+        ls->dirty = true;
+        snprintf(ls->message, sizeof(ls->message), "%s",
+                 filter_mode_label(next_mode));
+        return true;
+    }
+    case ' ':
+    case '\n': {
+        if (ls->filter_row_count <= 0 || ls->filter_cursor < 0 ||
+            ls->filter_cursor >= ls->filter_row_count)
+            return true;
+        budget_filter_row_t *row = &ls->filter_rows[ls->filter_cursor];
+        if (db_set_budget_category_filter_selected(ls->db, row->category.id,
+                                                   !row->selected) < 0) {
+            snprintf(ls->message, sizeof(ls->message),
+                     "Error saving category filter");
+            return true;
+        }
+        row->selected = !row->selected;
+        ls->dirty = true;
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 static bool handle_edit_key(budget_list_state_t *ls, int ch) {
@@ -1218,6 +1547,9 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
         return false;
     }
 
+    if (ls->filter_panel_open)
+        return handle_filter_panel_key(ls, ch);
+
     switch (ch) {
     case KEY_LEFT:
     case 'h':
@@ -1274,6 +1606,9 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
         if (ls->row_count > 0)
             begin_inline_edit(ls);
         return true;
+    case 'f':
+        open_filter_panel(ls);
+        return true;
     default:
         return false;
     }
@@ -1284,10 +1619,18 @@ const char *budget_list_status_hint(const budget_list_state_t *ls) {
         return "";
     if (ls->edit_mode)
         return "q:Quit  Enter:Save  Esc:Cancel  Left/Right:Move cursor";
-    return "q:Quit  h/l:Month  r:Current month  Up/Down:Navigate  Enter:Show matches  e:Edit parent budget  Esc:Sidebar";
+    if (ls->filter_panel_open)
+        return "q:Quit  Up/Down:Navigate  Space/Enter:Toggle category  m:Toggle mode  Esc/f:Close filter";
+    return "q:Quit  h/l:Month  r:Current month  Up/Down:Navigate  Enter:Show matches  e:Edit parent budget  f:Filter categories  Esc:Sidebar";
 }
 
 void budget_list_mark_dirty(budget_list_state_t *ls) {
-    if (ls)
+    if (ls) {
         ls->dirty = true;
+        if (ls->filter_panel_open && reload_filter_rows(ls) < 0) {
+            snprintf(ls->message, sizeof(ls->message),
+                     "Error loading category filters");
+            ls->filter_panel_open = false;
+        }
+    }
 }

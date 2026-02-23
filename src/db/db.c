@@ -78,6 +78,17 @@ static int migrate_schema(sqlite3 *db) {
 
     return exec_sql(
         db,
+        "CREATE TABLE IF NOT EXISTS budget_filter_settings ("
+        "    id INTEGER PRIMARY KEY CHECK(id = 1),"
+        "    mode TEXT NOT NULL"
+        "        CHECK(mode IN ('EXCLUDE_SELECTED', 'INCLUDE_SELECTED'))"
+        ");"
+        "CREATE TABLE IF NOT EXISTS budget_category_filters ("
+        "    category_id INTEGER PRIMARY KEY,"
+        "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
+        ");"
+        "INSERT OR IGNORE INTO budget_filter_settings (id, mode)"
+        " VALUES (1, 'EXCLUDE_SELECTED');"
         "CREATE INDEX IF NOT EXISTS idx_transactions_effective_date"
         " ON transactions(COALESCE(reflection_date, date));");
 }
@@ -127,13 +138,27 @@ static int create_schema(sqlite3 *db) {
         "    FOREIGN KEY (category_id) REFERENCES categories(id)"
         ");"
 
+        "CREATE TABLE IF NOT EXISTS budget_filter_settings ("
+        "    id INTEGER PRIMARY KEY CHECK(id = 1),"
+        "    mode TEXT NOT NULL"
+        "        CHECK(mode IN ('EXCLUDE_SELECTED', 'INCLUDE_SELECTED'))"
+        ");"
+
+        "CREATE TABLE IF NOT EXISTS budget_category_filters ("
+        "    category_id INTEGER PRIMARY KEY,"
+        "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
+        ");"
+
         "CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_transfer ON transactions(transfer_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_effective_date ON transactions(COALESCE(reflection_date, date));"
         "CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);"
-        "CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);";
+        "CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);"
+
+        "INSERT OR IGNORE INTO budget_filter_settings (id, mode)"
+        " VALUES (1, 'EXCLUDE_SELECTED');";
 
     return exec_sql(db, schema_sql);
 }

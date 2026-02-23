@@ -166,6 +166,18 @@ typedef struct {
     char description[256];
 } budget_txn_row_t;
 
+typedef enum {
+    BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED = 0,
+    BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED = 1
+} budget_category_filter_mode_t;
+
+typedef struct {
+    int64_t id;
+    int64_t parent_id; // 0 for top-level categories
+    category_type_t type;
+    char name[64];
+} budget_filter_category_t;
+
 // Fetch active top-level budget rows for month "YYYY-MM". Caller frees *out.
 // Returns count, -1 on error.
 int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
@@ -193,5 +205,24 @@ int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,
 int db_get_budget_transactions_for_month(sqlite3 *db, int64_t category_id,
                                          const char *month_ym,
                                          budget_txn_row_t **out);
+
+// Get/set persistent category filter mode for Budgets screen.
+// Default mode is BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED.
+int db_get_budget_category_filter_mode(sqlite3 *db,
+                                       budget_category_filter_mode_t *out_mode);
+int db_set_budget_category_filter_mode(sqlite3 *db,
+                                       budget_category_filter_mode_t mode);
+
+// Fetch selected budget filter category ids. Caller frees *out.
+int db_get_budget_category_filter_selected(sqlite3 *db, int64_t **out);
+
+// Toggle category selection in budget filters. selected=true inserts, false
+// removes. Returns 0 success, -2 not found, -1 error.
+int db_set_budget_category_filter_selected(sqlite3 *db, int64_t category_id,
+                                           bool selected);
+
+// Fetch all categories for budget filter UI. Caller frees *out. Returns count,
+// -1 on error.
+int db_get_budget_filter_categories(sqlite3 *db, budget_filter_category_t **out);
 
 #endif

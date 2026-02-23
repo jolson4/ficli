@@ -44,6 +44,20 @@ static const char *category_type_to_str(category_type_t type) {
     return (type == CATEGORY_INCOME) ? "INCOME" : "EXPENSE";
 }
 
+static budget_category_filter_mode_t
+budget_filter_mode_from_str(const char *s) {
+    if (s && strcmp(s, "INCLUDE_SELECTED") == 0)
+        return BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED;
+    return BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED;
+}
+
+static const char *
+budget_filter_mode_to_str(budget_category_filter_mode_t mode) {
+    return (mode == BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED)
+               ? "INCLUDE_SELECTED"
+               : "EXCLUDE_SELECTED";
+}
+
 static int bind_text_or_null(sqlite3_stmt *stmt, int idx, const char *value) {
     if (value && value[0] != '\0')
         return sqlite3_bind_text(stmt, idx, value, -1, SQLITE_STATIC);
@@ -1393,12 +1407,35 @@ int db_get_budget_transactions_for_month(sqlite3 *db, int64_t category_id,
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(
         db,
-        "WITH RECURSIVE descendants(category_id) AS ("
-        "  SELECT id FROM categories WHERE id = ?"
-        "  UNION ALL"
-        "  SELECT c.id FROM categories c"
-        "  JOIN descendants d ON c.parent_id = d.category_id"
-        ")"
+        "WITH RECURSIVE"
+        " descendants(category_id) AS ("
+        "   SELECT id FROM categories WHERE id = ?"
+        "   UNION ALL"
+        "   SELECT c.id FROM categories c"
+        "   JOIN descendants d ON c.parent_id = d.category_id"
+        " ),"
+        " selected_descendants(category_id) AS ("
+        "   SELECT category_id FROM budget_category_filters"
+        "   UNION"
+        "   SELECT c.id FROM categories c"
+        "   JOIN selected_descendants sd ON c.parent_id = sd.category_id"
+        " ),"
+        " filter_mode(include_selected) AS ("
+        "   SELECT CASE"
+        "     WHEN EXISTS("
+        "       SELECT 1 FROM budget_filter_settings bfs"
+        "       WHERE bfs.id = 1 AND bfs.mode = 'INCLUDE_SELECTED'"
+        "     ) THEN 1 ELSE 0 END"
+        " ),"
+        " allowed_categories(category_id) AS ("
+        "   SELECT c.id"
+        "   FROM categories c"
+        "   CROSS JOIN filter_mode fm"
+        "   WHERE (fm.include_selected = 0"
+        "          AND c.id NOT IN (SELECT category_id FROM selected_descendants))"
+        "      OR (fm.include_selected = 1"
+        "          AND c.id IN (SELECT category_id FROM selected_descendants))"
+        " )"
         " SELECT t.id, t.amount_cents, t.type,"
         "        COALESCE(t.reflection_date, t.date),"
         "        COALESCE(a.name, ''),"
@@ -1410,6 +1447,7 @@ int db_get_budget_transactions_for_month(sqlite3 *db, int64_t category_id,
         "        COALESCE(t.description, '')"
         " FROM transactions t"
         " JOIN descendants d ON d.category_id = t.category_id"
+        " JOIN allowed_categories ac ON ac.category_id = t.category_id"
         " LEFT JOIN accounts a ON a.id = t.account_id"
         " LEFT JOIN categories c ON c.id = t.category_id"
         " LEFT JOIN categories p ON p.id = c.parent_id"
@@ -2092,6 +2130,266 @@ int db_update_transaction(sqlite3 *db, const transaction_t *txn) {
     return 0;
 }
 
+int db_get_budget_category_filter_mode(sqlite3 *db,
+                                       budget_category_filter_mode_t *out_mode) {
+    if (!out_mode)
+        return -1;
+    *out_mode = BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db, "SELECT mode FROM budget_filter_settings WHERE id = 1", -1, &stmt,
+        NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_budget_category_filter_mode prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const char *mode = (const char *)sqlite3_column_text(stmt, 0);
+        *out_mode = budget_filter_mode_from_str(mode);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE)
+        return 0;
+
+    fprintf(stderr, "db_get_budget_category_filter_mode step: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+}
+
+int db_set_budget_category_filter_mode(sqlite3 *db,
+                                       budget_category_filter_mode_t mode) {
+    if (mode != BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED &&
+        mode != BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "INSERT INTO budget_filter_settings (id, mode)"
+        " VALUES (1, ?)"
+        " ON CONFLICT(id)"
+        " DO UPDATE SET mode = excluded.mode",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_set_budget_category_filter_mode prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, budget_filter_mode_to_str(mode), -1,
+                      SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_set_budget_category_filter_mode step: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
+int db_get_budget_category_filter_selected(sqlite3 *db, int64_t **out) {
+    if (!out)
+        return -1;
+    *out = NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT category_id"
+        " FROM budget_category_filters"
+        " ORDER BY category_id",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_budget_category_filter_selected prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int capacity = 16;
+    int count = 0;
+    int64_t *list = malloc((size_t)capacity * sizeof(int64_t));
+    if (!list) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (count >= capacity) {
+            capacity *= 2;
+            int64_t *tmp =
+                realloc(list, (size_t)capacity * sizeof(int64_t));
+            if (!tmp) {
+                free(list);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
+            list = tmp;
+        }
+        list[count++] = sqlite3_column_int64(stmt, 0);
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_get_budget_category_filter_selected step: %s\n",
+                sqlite3_errmsg(db));
+        free(list);
+        return -1;
+    }
+
+    if (count == 0) {
+        free(list);
+        return 0;
+    }
+
+    *out = list;
+    return count;
+}
+
+int db_set_budget_category_filter_selected(sqlite3 *db, int64_t category_id,
+                                           bool selected) {
+    if (category_id <= 0)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT 1 FROM categories WHERE id = ?", -1,
+                                &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_set_budget_category_filter_selected prepare chk: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_int64(stmt, 1, category_id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_ROW) {
+        if (rc != SQLITE_DONE) {
+            fprintf(stderr,
+                    "db_set_budget_category_filter_selected step chk: %s\n",
+                    sqlite3_errmsg(db));
+            return -1;
+        }
+        return -2;
+    }
+
+    if (selected) {
+        rc = sqlite3_prepare_v2(
+            db,
+            "INSERT OR IGNORE INTO budget_category_filters (category_id)"
+            " VALUES (?)",
+            -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr,
+                    "db_set_budget_category_filter_selected prepare ins: %s\n",
+                    sqlite3_errmsg(db));
+            return -1;
+        }
+    } else {
+        rc = sqlite3_prepare_v2(
+            db, "DELETE FROM budget_category_filters WHERE category_id = ?", -1,
+            &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr,
+                    "db_set_budget_category_filter_selected prepare del: %s\n",
+                    sqlite3_errmsg(db));
+            return -1;
+        }
+    }
+
+    sqlite3_bind_int64(stmt, 1, category_id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_set_budget_category_filter_selected step: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
+int db_get_budget_filter_categories(sqlite3 *db, budget_filter_category_t **out) {
+    if (!out)
+        return -1;
+    *out = NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT c.id, COALESCE(c.parent_id, 0), c.type, c.name"
+        " FROM categories c"
+        " LEFT JOIN categories p ON p.id = c.parent_id"
+        " ORDER BY"
+        "   CASE WHEN c.type = 'EXPENSE' THEN 0 ELSE 1 END,"
+        "   CASE WHEN c.parent_id IS NULL THEN c.name ELSE p.name END"
+        "      COLLATE NOCASE,"
+        "   CASE WHEN c.parent_id IS NULL THEN 0 ELSE 1 END,"
+        "   c.name COLLATE NOCASE",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_budget_filter_categories prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int capacity = 16;
+    int count = 0;
+    budget_filter_category_t *list =
+        malloc((size_t)capacity * sizeof(budget_filter_category_t));
+    if (!list) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (count >= capacity) {
+            capacity *= 2;
+            budget_filter_category_t *tmp = realloc(
+                list, (size_t)capacity * sizeof(budget_filter_category_t));
+            if (!tmp) {
+                free(list);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
+            list = tmp;
+        }
+
+        memset(&list[count], 0, sizeof(budget_filter_category_t));
+        list[count].id = sqlite3_column_int64(stmt, 0);
+        list[count].parent_id = sqlite3_column_int64(stmt, 1);
+        const char *ctype = (const char *)sqlite3_column_text(stmt, 2);
+        list[count].type =
+            (ctype && strcmp(ctype, "INCOME") == 0) ? CATEGORY_INCOME
+                                                     : CATEGORY_EXPENSE;
+        const char *name = (const char *)sqlite3_column_text(stmt, 3);
+        snprintf(list[count].name, sizeof(list[count].name), "%s",
+                 name ? name : "");
+        count++;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_get_budget_filter_categories step: %s\n",
+                sqlite3_errmsg(db));
+        free(list);
+        return -1;
+    }
+
+    if (count == 0) {
+        free(list);
+        return 0;
+    }
+
+    *out = list;
+    return count;
+}
+
 int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
                                  budget_row_t **out) {
     if (!out)
@@ -2116,6 +2414,34 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "   FROM descendants d"
         "   JOIN categories c ON c.parent_id = d.category_id"
         " ),"
+        " selected_descendants(category_id) AS ("
+        "   SELECT category_id FROM budget_category_filters"
+        "   UNION"
+        "   SELECT c.id FROM categories c"
+        "   JOIN selected_descendants sd ON c.parent_id = sd.category_id"
+        " ),"
+        " filter_mode(include_selected) AS ("
+        "   SELECT CASE"
+        "     WHEN EXISTS("
+        "       SELECT 1 FROM budget_filter_settings bfs"
+        "       WHERE bfs.id = 1 AND bfs.mode = 'INCLUDE_SELECTED'"
+        "     ) THEN 1 ELSE 0 END"
+        " ),"
+        " allowed_categories(category_id) AS ("
+        "   SELECT c.id"
+        "   FROM categories c"
+        "   CROSS JOIN filter_mode fm"
+        "   WHERE (fm.include_selected = 0"
+        "          AND c.id NOT IN (SELECT category_id FROM selected_descendants))"
+        "      OR (fm.include_selected = 1"
+        "          AND c.id IN (SELECT category_id FROM selected_descendants))"
+        " ),"
+        " allowed_descendant_counts AS ("
+        "   SELECT d.parent_id, COUNT(*) AS allowed_count"
+        "   FROM descendants d"
+        "   JOIN allowed_categories ac ON ac.category_id = d.category_id"
+        "   GROUP BY d.parent_id"
+        " ),"
         " monthly_net AS ("
         "   SELECT d.parent_id,"
         "          COALESCE(SUM(CASE"
@@ -2126,6 +2452,7 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "   FROM descendants d"
         "   LEFT JOIN transactions t"
         "     ON t.category_id = d.category_id"
+        "    AND t.category_id IN (SELECT category_id FROM allowed_categories)"
         "    AND substr(COALESCE(t.reflection_date, t.date), 1, 7) = ?"
         "    AND t.type IN ('EXPENSE', 'INCOME')"
         "   GROUP BY d.parent_id"
@@ -2139,6 +2466,7 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "          EXISTS("
         "            SELECT 1"
         "            FROM descendants dd"
+        "            JOIN allowed_categories ac ON ac.category_id = dd.category_id"
         "            JOIN budgets b2 ON b2.category_id = dd.category_id"
         "            WHERE dd.parent_id = p.id AND b2.month <= ?"
         "          ) AS subtree_has_rule,"
@@ -2160,10 +2488,12 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         "        f.has_rule"
         " FROM parents p"
         " JOIN flags f ON f.parent_id = p.id"
+        " JOIN allowed_descendant_counts adc ON adc.parent_id = p.id"
         " LEFT JOIN monthly_net mn ON mn.parent_id = p.id"
-        " WHERE f.has_rule = 1"
-        "    OR f.subtree_has_rule = 1"
-        "    OR COALESCE(mn.net_spent_cents, 0) != 0"
+        " WHERE adc.allowed_count > 0"
+        "   AND (f.has_rule = 1"
+        "        OR f.subtree_has_rule = 1"
+        "        OR COALESCE(mn.net_spent_cents, 0) != 0)"
         " ORDER BY p.name",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -2253,6 +2583,34 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "   FROM descendants d"
         "   JOIN categories c ON c.parent_id = d.category_id"
         " ),"
+        " selected_descendants(category_id) AS ("
+        "   SELECT category_id FROM budget_category_filters"
+        "   UNION"
+        "   SELECT c.id FROM categories c"
+        "   JOIN selected_descendants sd ON c.parent_id = sd.category_id"
+        " ),"
+        " filter_mode(include_selected) AS ("
+        "   SELECT CASE"
+        "     WHEN EXISTS("
+        "       SELECT 1 FROM budget_filter_settings bfs"
+        "       WHERE bfs.id = 1 AND bfs.mode = 'INCLUDE_SELECTED'"
+        "     ) THEN 1 ELSE 0 END"
+        " ),"
+        " allowed_categories(category_id) AS ("
+        "   SELECT c.id"
+        "   FROM categories c"
+        "   CROSS JOIN filter_mode fm"
+        "   WHERE (fm.include_selected = 0"
+        "          AND c.id NOT IN (SELECT category_id FROM selected_descendants))"
+        "      OR (fm.include_selected = 1"
+        "          AND c.id IN (SELECT category_id FROM selected_descendants))"
+        " ),"
+        " allowed_descendant_counts AS ("
+        "   SELECT d.root_id, COUNT(*) AS allowed_count"
+        "   FROM descendants d"
+        "   JOIN allowed_categories ac ON ac.category_id = d.category_id"
+        "   GROUP BY d.root_id"
+        " ),"
         " monthly_net AS ("
         "   SELECT d.root_id,"
         "          COALESCE(SUM(CASE"
@@ -2263,6 +2621,7 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "   FROM descendants d"
         "   LEFT JOIN transactions t"
         "     ON t.category_id = d.category_id"
+        "    AND t.category_id IN (SELECT category_id FROM allowed_categories)"
         "    AND substr(COALESCE(t.reflection_date, t.date), 1, 7) = ?"
         "    AND t.type IN ('EXPENSE', 'INCOME')"
         "   GROUP BY d.root_id"
@@ -2281,12 +2640,17 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "          WHERE b2.category_id = r.id AND b2.month <= ?"
         "        )"
         " FROM roots r"
+        " JOIN allowed_descendant_counts adc ON adc.root_id = r.id"
         " LEFT JOIN monthly_net mn ON mn.root_id = r.id"
-        " WHERE COALESCE(mn.net_spent_cents, 0) != 0"
-        "    OR EXISTS("
-        "      SELECT 1 FROM budgets b3"
-        "      WHERE b3.category_id = r.id AND b3.month <= ?"
-        "    )"
+        " WHERE adc.allowed_count > 0"
+        "   AND (COALESCE(mn.net_spent_cents, 0) != 0"
+        "        OR EXISTS("
+        "          SELECT 1"
+        "          FROM descendants dd"
+        "          JOIN allowed_categories ac ON ac.category_id = dd.category_id"
+        "          JOIN budgets b3 ON b3.category_id = dd.category_id"
+        "          WHERE dd.root_id = r.id AND b3.month <= ?"
+        "        ))"
         " ORDER BY r.name",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
