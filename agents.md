@@ -132,6 +132,8 @@ make clean    # clean build artifacts
 - [x] Show running deficit or surplus in budget view based on this year's actuals vs. expected progress through the current date. We should show a top-level running surplus/deficit number and per-category surplus/deficit numbers in the category list, between the "Budget" and "Net" columns.
 - [x] Update budget to show rows for budgeted categories, then in a lower table, "Unbudgeted Categories" show the remaining transactions (in the UI this should be between the "Budgeted Categories" table and the individual trtansactions table
 - [x] Rename "Run" column in budget view to "Running +/-"
+- [ ] Don't include transfers in the "Transactions" view header lines calculations
+- [ ] Delegate import logic across CPU cores for perf
 - [ ] Allow user to specify "This edit to the budget only applies to the current month"
 - [ ] Make edit Category popout larger
 - [ ] Allow user to say if a category is an "Expense" or "Income" category

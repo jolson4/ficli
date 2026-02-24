@@ -13,6 +13,7 @@ static const char *account_type_db_strings[] = {
 static const char *transaction_type_db_strings[] = {
     "EXPENSE", "INCOME", "TRANSFER"
 };
+static const int transfer_match_date_window_days = 3;
 
 static account_type_t account_type_from_str(const char *s) {
     if (s) {
@@ -1724,7 +1725,7 @@ int db_get_transfer_counterparty_account(sqlite3 *db, int64_t txn_id,
 }
 
 int db_update_transfer(sqlite3 *db, const transaction_t *txn,
-                       int64_t to_account_id) {
+                       int64_t to_account_id, bool allow_existing_match) {
     if (!txn)
         return -1;
     if (txn->account_id <= 0 || to_account_id <= 0 || txn->account_id == to_account_id)
@@ -1752,11 +1753,11 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
     }
     sqlite3_bind_int64(stmt, 1, txn->id);
 
-    int64_t transfer_id = 0;
+    int64_t source_id = 0;
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
         if (sqlite3_column_type(stmt, 0) != SQLITE_NULL)
-            transfer_id = sqlite3_column_int64(stmt, 0);
+            source_id = sqlite3_column_int64(stmt, 0);
     } else if (rc == SQLITE_DONE) {
         sqlite3_finalize(stmt);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
@@ -1769,20 +1770,46 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
     sqlite3_finalize(stmt);
     stmt = NULL;
 
-    if (transfer_id <= 0)
-        transfer_id = txn->id;
+    if (source_id <= 0)
+        source_id = txn->id;
+
+    // transfer_id is the canonical source row id for transfer direction.
+    if (source_id != txn->id) {
+        rc = sqlite3_prepare_v2(db, "SELECT 1 FROM transactions WHERE id = ?",
+                                -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "db_update_transfer prepare source exists: %s\n",
+                    sqlite3_errmsg(db));
+            goto rollback;
+        }
+        sqlite3_bind_int64(stmt, 1, source_id);
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        if (rc == SQLITE_DONE) {
+            source_id = txn->id;
+        } else if (rc != SQLITE_ROW) {
+            fprintf(stderr, "db_update_transfer step source exists: %s\n",
+                    sqlite3_errmsg(db));
+            goto rollback;
+        }
+    }
 
     int64_t mirror_id = 0;
     rc = sqlite3_prepare_v2(
         db,
-        "SELECT id FROM transactions WHERE transfer_id = ? AND id != ? LIMIT 1",
+        "SELECT id FROM transactions"
+        " WHERE transfer_id = ? AND id != ?"
+        " ORDER BY CASE WHEN account_id = ? THEN 0 ELSE 1 END, id"
+        " LIMIT 1",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_update_transfer prepare mirror: %s\n", sqlite3_errmsg(db));
         goto rollback;
     }
-    sqlite3_bind_int64(stmt, 1, transfer_id);
-    sqlite3_bind_int64(stmt, 2, txn->id);
+    sqlite3_bind_int64(stmt, 1, source_id);
+    sqlite3_bind_int64(stmt, 2, source_id);
+    sqlite3_bind_int64(stmt, 3, to_account_id);
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
         mirror_id = sqlite3_column_int64(stmt, 0);
@@ -1793,6 +1820,43 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
     }
     sqlite3_finalize(stmt);
     stmt = NULL;
+
+    if (mirror_id <= 0 && allow_existing_match) {
+        rc = sqlite3_prepare_v2(
+            db,
+            "SELECT id FROM transactions"
+            " WHERE account_id = ?"
+            "   AND id != ?"
+            "   AND transfer_id IS NULL"
+            "   AND type != 'TRANSFER'"
+            "   AND amount_cents = ?"
+            "   AND ABS(julianday(date) - julianday(?)) <= ?"
+            " ORDER BY ABS(julianday(date) - julianday(?)) ASC, id DESC"
+            " LIMIT 1",
+            -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "db_update_transfer prepare match existing: %s\n",
+                    sqlite3_errmsg(db));
+            goto rollback;
+        }
+        sqlite3_bind_int64(stmt, 1, to_account_id);
+        sqlite3_bind_int64(stmt, 2, source_id);
+        sqlite3_bind_int64(stmt, 3, txn->amount_cents);
+        sqlite3_bind_text(stmt, 4, norm_date, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 5, transfer_match_date_window_days);
+        sqlite3_bind_text(stmt, 6, norm_date, -1, SQLITE_TRANSIENT);
+        rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW) {
+            mirror_id = sqlite3_column_int64(stmt, 0);
+        } else if (rc != SQLITE_DONE) {
+            fprintf(stderr, "db_update_transfer step match existing: %s\n",
+                    sqlite3_errmsg(db));
+            sqlite3_finalize(stmt);
+            goto rollback;
+        }
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
 
     rc = sqlite3_prepare_v2(
         db,
@@ -1814,8 +1878,8 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
         sqlite3_bind_null(stmt, 4);
     bind_text_or_null(stmt, 5, txn->payee);
     bind_text_or_null(stmt, 6, txn->description);
-    sqlite3_bind_int64(stmt, 7, transfer_id);
-    sqlite3_bind_int64(stmt, 8, txn->id);
+    sqlite3_bind_int64(stmt, 7, source_id);
+    sqlite3_bind_int64(stmt, 8, source_id);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     stmt = NULL;
@@ -1847,7 +1911,7 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
             sqlite3_bind_null(stmt, 4);
         bind_text_or_null(stmt, 5, txn->payee);
         bind_text_or_null(stmt, 6, txn->description);
-        sqlite3_bind_int64(stmt, 7, transfer_id);
+        sqlite3_bind_int64(stmt, 7, source_id);
         sqlite3_bind_int64(stmt, 8, mirror_id);
         rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
@@ -1858,7 +1922,7 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
             goto rollback;
         }
     } else {
-        if (insert_transfer_row(db, txn, to_account_id, transfer_id, NULL) < 0)
+        if (insert_transfer_row(db, txn, to_account_id, source_id, NULL) < 0)
             goto rollback;
     }
 

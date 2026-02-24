@@ -66,7 +66,7 @@ int db_update_transaction(sqlite3 *db, const transaction_t *txn);
 // Update or create a transfer pair for an existing source transaction id.
 // Returns 0 success, -2 not found, -3 invalid accounts, -1 error.
 int db_update_transfer(sqlite3 *db, const transaction_t *txn,
-                       int64_t to_account_id);
+                       int64_t to_account_id, bool allow_existing_match);
 
 // Get the paired transfer account id for txn_id. Returns 0 success, -2 if no
 // linked pair, -1 on error.

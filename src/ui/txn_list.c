@@ -254,7 +254,7 @@ static bool txn_list_apply_edit_changes_to_one(
 
         if (to_account_id <= 0 || to_account_id == txn.account_id)
             return false;
-        rc = db_update_transfer(ls->db, &txn, to_account_id);
+        rc = db_update_transfer(ls->db, &txn, to_account_id, true);
         return rc == 0;
     }
 

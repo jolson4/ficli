@@ -12,6 +12,7 @@
 #define MAX_COLS 32
 #define LINE_BUF 4096
 #define FIELD_BUF 4096
+static const int transfer_match_date_window_days = 3;
 
 // Parse one CSV line into fields[]. Each fields[i] points into buf.
 // Returns number of fields parsed.
@@ -672,6 +673,121 @@ static acct_txn_cache_t *get_acct_cache(sqlite3 *db, acct_txn_cache_t *caches,
     return c;
 }
 
+// Find a unique unlinked counterparty transaction in another account with
+// matching date+amount and opposite EXPENSE/INCOME type.
+// Returns 0 when exactly one match exists, -2 when none/ambiguous, -1 on error.
+static int find_unique_transfer_counterparty(sqlite3 *db, int64_t account_id,
+                                             const char *date,
+                                             int64_t amount_cents,
+                                             transaction_type_t type,
+                                             int64_t *out_txn_id,
+                                             int64_t *out_account_id) {
+    if (!db || !date || !out_txn_id || !out_account_id)
+        return -1;
+    *out_txn_id = 0;
+    *out_account_id = 0;
+    if (type != TRANSACTION_EXPENSE && type != TRANSACTION_INCOME)
+        return -2;
+
+    const char *counterparty_type =
+        (type == TRANSACTION_EXPENSE) ? "INCOME" : "EXPENSE";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT id, account_id FROM transactions"
+        " WHERE account_id != ?"
+        "   AND transfer_id IS NULL"
+        "   AND type = ?"
+        "   AND amount_cents = ?"
+        "   AND ABS(julianday(date) - julianday(?)) <= ?"
+        " ORDER BY ABS(julianday(date) - julianday(?)) ASC, id DESC",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "find_unique_transfer_counterparty prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    sqlite3_bind_text(stmt, 2, counterparty_type, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 3, amount_cents);
+    sqlite3_bind_text(stmt, 4, date, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, transfer_match_date_window_days);
+    sqlite3_bind_text(stmt, 6, date, -1, SQLITE_STATIC);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return -2;
+    }
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "find_unique_transfer_counterparty step first: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    int64_t matched_txn_id = sqlite3_column_int64(stmt, 0);
+    int64_t matched_account_id = sqlite3_column_int64(stmt, 1);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_ROW) {
+        return -2;
+    }
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "find_unique_transfer_counterparty step second: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    *out_txn_id = matched_txn_id;
+    *out_account_id = matched_account_id;
+    return 0;
+}
+
+static int maybe_autolink_imported_transfer(sqlite3 *db, int64_t txn_id,
+                                            int64_t account_id,
+                                            const char *date,
+                                            int64_t amount_cents,
+                                            transaction_type_t type) {
+    int64_t counterparty_txn_id = 0;
+    int64_t counterparty_account_id = 0;
+    int rc = find_unique_transfer_counterparty(
+        db, account_id, date, amount_cents, type, &counterparty_txn_id,
+        &counterparty_account_id);
+    if (rc == -2)
+        return 0;
+    if (rc < 0)
+        return -1;
+
+    if (type == TRANSACTION_EXPENSE) {
+        transaction_t source = {0};
+        if (db_get_transaction_by_id(db, (int)txn_id, &source) != 0)
+            return -1;
+        source.type = TRANSACTION_TRANSFER;
+        source.category_id = 0;
+        source.payee[0] = '\0';
+        rc = db_update_transfer(db, &source, counterparty_account_id, true);
+    } else {
+        transaction_t source = {0};
+        if (db_get_transaction_by_id(db, (int)counterparty_txn_id, &source) !=
+            0)
+            return -1;
+        source.type = TRANSACTION_TRANSFER;
+        source.category_id = 0;
+        source.payee[0] = '\0';
+        rc = db_update_transfer(db, &source, account_id, true);
+    }
+
+    if (rc == -2 || rc == -3)
+        return 0;
+    if (rc < 0)
+        return -1;
+    return 0;
+}
+
 void csv_parse_result_free(csv_parse_result_t *r) {
     if (!r)
         return;
@@ -758,7 +874,13 @@ int csv_import_credit_card(sqlite3 *db, const csv_parse_result_t *r,
             }
         }
 
-        if (db_insert_transaction(db, &txn) < 0) {
+        int64_t row_id = db_insert_transaction(db, &txn);
+        if (row_id < 0) {
+            ret = -1;
+            goto cleanup;
+        }
+        if (maybe_autolink_imported_transfer(db, row_id, account_id, txn.date,
+                                             txn.amount_cents, txn.type) < 0) {
             ret = -1;
             goto cleanup;
         }
@@ -826,7 +948,13 @@ int csv_import_checking(sqlite3 *db, const csv_parse_result_t *r,
             }
         }
 
-        if (db_insert_transaction(db, &txn) < 0) {
+        int64_t row_id = db_insert_transaction(db, &txn);
+        if (row_id < 0) {
+            ret = -1;
+            break;
+        }
+        if (maybe_autolink_imported_transfer(db, row_id, account_id, txn.date,
+                                             txn.amount_cents, txn.type) < 0) {
             ret = -1;
             break;
         }

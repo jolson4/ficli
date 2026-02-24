@@ -22,6 +22,7 @@
 #define MAX_DROP 5
 #define CATEGORY_OPTION_UNCATEGORIZED "<Uncategorized>"
 #define CATEGORY_OPTION_ADD "<Add category>"
+static const int transfer_match_date_window_days = 3;
 
 enum {
     FIELD_TYPE,
@@ -39,6 +40,7 @@ enum {
 
 typedef struct {
     WINDOW *win;
+    WINDOW *parent;
     sqlite3 *db;
     transaction_t *txn;
     bool is_edit;
@@ -405,15 +407,39 @@ static void form_init_state(form_state_t *fs, sqlite3 *db, transaction_t *txn,
             }
         } else if (fs->txn_type == TRANSACTION_TRANSFER) {
             int64_t other_account_id = 0;
-            if (db_get_transfer_counterparty_account(fs->db, txn->id,
-                                                     &other_account_id) == 0) {
+            int rc = db_get_transfer_counterparty_account(fs->db, txn->id,
+                                                          &other_account_id);
+            int64_t from_account_id = txn->account_id;
+            int64_t to_account_id = (rc == 0) ? other_account_id : 0;
+
+            if (txn->transfer_id > 0 && txn->id != txn->transfer_id && rc == 0) {
+                // Editing the mirrored transfer row: canonical "from" is the
+                // source row account, canonical "to" is this row account.
+                from_account_id = other_account_id;
+                to_account_id = txn->account_id;
+            }
+
+            for (int i = 0; i < fs->account_count; i++) {
+                if (fs->accounts[i].id == from_account_id) {
+                    fs->account_sel = i;
+                    break;
+                }
+            }
+
+            if (to_account_id > 0) {
                 for (int i = 0; i < fs->account_count; i++) {
-                    if (fs->accounts[i].id == other_account_id) {
+                    if (fs->accounts[i].id == to_account_id) {
                         fs->transfer_account_sel = i;
                         break;
                     }
                 }
             } else {
+                fs->transfer_account_sel =
+                    first_other_account_index(fs, fs->account_sel);
+            }
+
+            if (fs->transfer_account_sel == fs->account_sel &&
+                fs->account_count > 1) {
                 fs->transfer_account_sel =
                     first_other_account_index(fs, fs->account_sel);
             }
@@ -459,7 +485,9 @@ static void form_draw(form_state_t *fs) {
         bool active = (i == fs->current_field && !fs->dropdown_open);
 
         // Label
-        if (i == FIELD_CATEGORY && fs->txn_type == TRANSACTION_TRANSFER)
+        if (i == FIELD_ACCOUNT && fs->txn_type == TRANSACTION_TRANSFER)
+            mvwprintw(w, row, LABEL_COL, "From Account:");
+        else if (i == FIELD_CATEGORY && fs->txn_type == TRANSACTION_TRANSFER)
             mvwprintw(w, row, LABEL_COL, "To Account:");
         else
             mvwprintw(w, row, LABEL_COL, "%s:", field_labels[i]);
@@ -831,6 +859,33 @@ static transaction_type_t prev_type(transaction_type_t type) {
     return TRANSACTION_INCOME;
 }
 
+static void form_apply_transfer_direction_default(form_state_t *fs,
+                                                  transaction_type_t prior_type) {
+    if (!fs || fs->txn_type != TRANSACTION_TRANSFER || fs->account_count < 2)
+        return;
+
+    transaction_type_t direction_basis = prior_type;
+    if (fs->is_edit && fs->txn && fs->txn->type != TRANSACTION_TRANSFER) {
+        // When converting an existing non-transfer row, keep direction aligned
+        // to the original row instead of intermediate type toggles.
+        direction_basis = fs->txn->type;
+    }
+
+    if (direction_basis == TRANSACTION_INCOME) {
+        // Income means money entered the selected account, so that account is "To".
+        int to_idx = fs->account_sel;
+        fs->account_sel = first_other_account_index(fs, to_idx);
+        fs->transfer_account_sel = to_idx;
+        return;
+    }
+
+    // Expense defaults to money leaving the selected account ("From").
+    if (fs->transfer_account_sel == fs->account_sel) {
+        fs->transfer_account_sel =
+            first_other_account_index(fs, fs->account_sel);
+    }
+}
+
 // Parse amount string to cents. Returns -1 on invalid input.
 static int64_t parse_amount_cents(const char *str) {
     if (str[0] == '\0')
@@ -1156,6 +1211,110 @@ static bool confirm_apply_category_to_payee(WINDOW *parent, const char *payee,
     return confirm;
 }
 
+static int64_t count_transfer_match_candidates(sqlite3 *db, int64_t account_id,
+                                               int64_t exclude_txn_id,
+                                               const char *date,
+                                               int64_t amount_cents) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT COUNT(*) FROM transactions"
+        " WHERE account_id = ?"
+        "   AND id != ?"
+        "   AND type != 'TRANSFER'"
+        "   AND amount_cents = ?"
+        "   AND ABS(julianday(date) - julianday(?)) <= ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK)
+        return -1;
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    sqlite3_bind_int64(stmt, 2, exclude_txn_id);
+    sqlite3_bind_int64(stmt, 3, amount_cents);
+    sqlite3_bind_text(stmt, 4, date, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, transfer_match_date_window_days);
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    int64_t matches = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return matches;
+}
+
+static bool confirm_reuse_transfer_match(WINDOW *parent, const char *account_name,
+                                         int64_t match_count) {
+    if (!parent)
+        return true;
+
+    int ph, pw;
+    getmaxyx(parent, ph, pw);
+
+    int win_h = 9;
+    int win_w = 74;
+    if (ph < win_h)
+        win_h = ph;
+    if (pw < win_w)
+        win_w = pw;
+    if (win_h < 6 || win_w < 40)
+        return true;
+
+    int py, px;
+    getbegyx(parent, py, px);
+    int win_y = py + (ph - win_h) / 2;
+    int win_x = px + (pw - win_w) / 2;
+
+    WINDOW *w = newwin(win_h, win_w, win_y, win_x);
+    keypad(w, TRUE);
+    wbkgd(w, COLOR_PAIR(COLOR_FORM));
+    box(w, 0, 0);
+
+    mvwprintw(w, 1, 2, "Use an existing matching transaction?");
+    mvwprintw(w, 3, 2,
+              "%ld match%s found in '%-.28s' (within %d day%s + same amount).",
+              (long)match_count, match_count == 1 ? "" : "es", account_name,
+              transfer_match_date_window_days,
+              transfer_match_date_window_days == 1 ? "" : "s");
+    mvwprintw(w, 5, 2, "Reusing prevents creating duplicate transfer entries.");
+    mvwprintw(w, win_h - 2, 2, "y:Reuse Existing  n:Create New");
+    wrefresh(w);
+
+    bool reuse = true;
+    bool done = false;
+    while (!done) {
+        int ch = wgetch(w);
+        if (ui_requeue_resize_event(ch)) {
+            reuse = true;
+            done = true;
+            continue;
+        }
+        switch (ch) {
+        case 'y':
+        case 'Y':
+            reuse = true;
+            done = true;
+            break;
+        case 'n':
+        case 'N':
+            reuse = false;
+            done = true;
+            break;
+        case 27:
+            reuse = true;
+            done = true;
+            break;
+        default:
+            break;
+        }
+    }
+
+    delwin(w);
+    touchwin(parent);
+    return reuse;
+}
+
 static void maybe_propagate_category_to_payee(WINDOW *parent, form_state_t *fs) {
     if (!fs->offer_category_propagation)
         return;
@@ -1241,7 +1400,23 @@ static bool form_validate_and_save(form_state_t *fs) {
     if (fs->is_edit) {
         if (fs->txn_type == TRANSACTION_TRANSFER) {
             int64_t to_account_id = fs->accounts[fs->transfer_account_sel].id;
-            int rc = db_update_transfer(fs->db, &txn, to_account_id);
+            bool allow_existing_match = true;
+            if (fs->txn && fs->txn->type != TRANSACTION_TRANSFER) {
+                int64_t match_count = count_transfer_match_candidates(
+                    fs->db, to_account_id, txn.id, txn.date, txn.amount_cents);
+                if (match_count < 0) {
+                    snprintf(fs->error, sizeof(fs->error), "Database error");
+                    return false;
+                }
+                if (match_count > 0) {
+                    allow_existing_match = confirm_reuse_transfer_match(
+                        fs->parent,
+                        fs->accounts[fs->transfer_account_sel].name, match_count);
+                }
+            }
+
+            int rc = db_update_transfer(fs->db, &txn, to_account_id,
+                                        allow_existing_match);
             if (rc == -2) {
                 snprintf(fs->error, sizeof(fs->error), "Transaction not found");
                 return false;
@@ -2013,6 +2188,7 @@ form_transaction_with_options(WINDOW *parent, sqlite3 *db, transaction_t *txn,
 
     form_state_t fs;
     form_init_state(&fs, db, txn, is_edit, prefill_from_txn);
+    fs.parent = parent;
     fs.title = title;
     fs.submit_label = submit_label;
     if (focus_submit)
@@ -2133,9 +2309,11 @@ form_transaction_with_options(WINDOW *parent, sqlite3 *db, transaction_t *txn,
                     done = true;
                 }
             } else if (fs.current_field == FIELD_TYPE) {
+                transaction_type_t prior_type = fs.txn_type;
                 fs.txn_type = next_type(fs.txn_type);
                 form_load_categories(&fs);
                 form_select_default_category(&fs);
+                form_apply_transfer_direction_default(&fs, prior_type);
             } else if (fs.current_field == FIELD_ACCOUNT ||
                        fs.current_field == FIELD_CATEGORY) {
                 form_open_dropdown(&fs);
@@ -2150,9 +2328,11 @@ form_transaction_with_options(WINDOW *parent, sqlite3 *db, transaction_t *txn,
 
         case KEY_LEFT:
             if (fs.current_field == FIELD_TYPE) {
+                transaction_type_t prior_type = fs.txn_type;
                 fs.txn_type = prev_type(fs.txn_type);
                 form_load_categories(&fs);
                 form_select_default_category(&fs);
+                form_apply_transfer_direction_default(&fs, prior_type);
                 if (field_hidden(&fs, fs.current_field))
                     move_to_next_field(&fs);
             } else if (fs.current_field == FIELD_ACCOUNT) {
@@ -2182,9 +2362,11 @@ form_transaction_with_options(WINDOW *parent, sqlite3 *db, transaction_t *txn,
 
         case KEY_RIGHT:
             if (fs.current_field == FIELD_TYPE) {
+                transaction_type_t prior_type = fs.txn_type;
                 fs.txn_type = next_type(fs.txn_type);
                 form_load_categories(&fs);
                 form_select_default_category(&fs);
+                form_apply_transfer_direction_default(&fs, prior_type);
                 if (field_hidden(&fs, fs.current_field))
                     move_to_next_field(&fs);
             } else if (fs.current_field == FIELD_ACCOUNT) {
@@ -2269,6 +2451,7 @@ form_result_t form_transaction_category(WINDOW *parent, sqlite3 *db,
 
     form_state_t fs;
     form_init_state(&fs, db, txn, true, false);
+    fs.parent = parent;
     fs.current_field = FIELD_CATEGORY;
     fs.error[0] = '\0';
 
