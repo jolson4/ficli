@@ -358,10 +358,13 @@ static int prompt_assign_existing_category(WINDOW *parent,
             if (idx >= category_count)
                 break;
             int row = 3 + i;
+            const char *type_label =
+                categories[idx].type == CATEGORY_INCOME ? "Income" : "Expense";
             if (idx == sel)
                 wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
             mvwprintw(w, row, 2, "%-*s", list_w, "");
-            mvwprintw(w, row, 2, "%.*s", list_w, categories[idx].name);
+            mvwprintw(w, row, 2, "%-7s  %.*s", type_label, list_w - 9,
+                      categories[idx].name);
             if (idx == sel)
                 wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
         }
@@ -496,9 +499,35 @@ static int apply_import_categories(WINDOW *parent, sqlite3 *db,
                 }
 
                 if (action == IMPORT_CATEGORY_ASSIGN) {
+                    int assign_count = expense_count + income_count;
+                    category_t *assign_categories = NULL;
+                    if (assign_count > 0) {
+                        assign_categories =
+                            calloc((size_t)assign_count, sizeof(*assign_categories));
+                        if (!assign_categories) {
+                            snprintf(error, error_sz, "Out of memory.");
+                            free(resolutions);
+                            free(expense_categories);
+                            free(income_categories);
+                            return -1;
+                        }
+                        int cursor = 0;
+                        if (expense_count > 0) {
+                            memcpy(assign_categories + cursor, expense_categories,
+                                   (size_t)expense_count * sizeof(*assign_categories));
+                            cursor += expense_count;
+                        }
+                        if (income_count > 0) {
+                            memcpy(assign_categories + cursor, income_categories,
+                                   (size_t)income_count * sizeof(*assign_categories));
+                        }
+                    }
+
                     int64_t selected_id = 0;
-                    if (prompt_assign_existing_category(parent, typed_categories,
-                                                        typed_count, &selected_id)) {
+                    int picked = prompt_assign_existing_category(
+                        parent, assign_categories, assign_count, &selected_id);
+                    free(assign_categories);
+                    if (picked) {
                         resolved_id = selected_id;
                         break;
                     }
