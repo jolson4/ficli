@@ -191,15 +191,14 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
 int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
                                        const char *month_ym, budget_row_t **out);
 
-// Fetch running budget progress for current local calendar year through today
-// for a category subtree. actual_cents uses EXPENSE-INCOME net over allowed
-// categories based on current budget filter settings. expected_cents is the sum
-// of monthly effective limits for category_id from Jan through current month,
-// with current month counted at full monthly budget.
-int db_get_budget_running_progress_for_current_year(sqlite3 *db,
-                                                    int64_t category_id,
-                                                    int64_t *out_actual_cents,
-                                                    int64_t *out_expected_cents);
+// Fetch running budget progress for the selected month context. Sums are for
+// previous months only within that month's calendar year (Jan..month-1) for
+// the category subtree. actual_cents uses EXPENSE-INCOME net over allowed
+// categories based on current budget filter settings. expected_cents is the
+// sum of monthly effective limits over the same range.
+int db_get_budget_running_progress_for_year_before_month(
+    sqlite3 *db, int64_t category_id, const char *month_ym,
+    int64_t *out_actual_cents, int64_t *out_expected_cents);
 
 // Set a category budget rule effective from month "YYYY-MM". If the exact
 // effective month exists, updates it. Returns 0 success, -1 on error.

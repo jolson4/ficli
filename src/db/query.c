@@ -2764,21 +2764,24 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
     return count;
 }
 
-int db_get_budget_running_progress_for_current_year(sqlite3 *db,
-                                                    int64_t category_id,
-                                                    int64_t *out_actual_cents,
-                                                    int64_t *out_expected_cents) {
+int db_get_budget_running_progress_for_year_before_month(
+    sqlite3 *db, int64_t category_id, const char *month_ym,
+    int64_t *out_actual_cents, int64_t *out_expected_cents) {
     if (!out_actual_cents || !out_expected_cents || category_id <= 0)
         return -1;
     *out_actual_cents = 0;
     *out_expected_cents = 0;
+
+    char norm_month[8];
+    if (normalize_budget_month(month_ym, norm_month) < 0)
+        return -1;
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(
         db,
         "WITH RECURSIVE"
         " descendants(category_id) AS ("
-        "   SELECT ?"
+        "   SELECT ?1"
         "   UNION ALL"
         "   SELECT c.id"
         "   FROM categories c"
@@ -2806,17 +2809,17 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
         "      OR (fm.include_selected = 1"
         "          AND c.id IN (SELECT category_id FROM selected_descendants))"
         " ),"
-        " current_ctx(current_date, year_start, current_month) AS ("
-        "   SELECT date('now', 'localtime'),"
-        "          date(strftime('%Y-01-01', 'now', 'localtime')),"
-        "          strftime('%Y-%m', 'now', 'localtime')"
+        " view_ctx(view_month, view_month_start, year_start) AS ("
+        "   SELECT ?2,"
+        "          date(?2 || '-01'),"
+        "          date(strftime('%Y-01-01', ?2 || '-01'))"
         " ),"
         " months(month_ym) AS ("
-        "   SELECT strftime('%Y-01', current_date) FROM current_ctx"
+        "   SELECT strftime('%Y-01', view_month_start) FROM view_ctx"
         "   UNION ALL"
         "   SELECT strftime('%Y-%m', date(month_ym || '-01', '+1 month'))"
         "   FROM months"
-        "   WHERE month_ym < (SELECT current_month FROM current_ctx)"
+        "   WHERE month_ym < (SELECT view_month FROM view_ctx)"
         " ),"
         " expected_progress AS ("
         "   SELECT COALESCE(SUM("
@@ -2834,6 +2837,8 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
         "     )"
         "   ), 0) AS expected_cents"
         "   FROM months m"
+        "   JOIN view_ctx vc"
+        "   WHERE m.month_ym < vc.view_month"
         " ),"
         " actual_progress AS ("
         "   SELECT COALESCE(SUM(CASE"
@@ -2844,10 +2849,10 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
         "   FROM transactions t"
         "   JOIN descendants d ON d.category_id = t.category_id"
         "   JOIN allowed_categories ac ON ac.category_id = t.category_id"
-        "   JOIN current_ctx cc"
+        "   JOIN view_ctx vc"
         "   WHERE t.type IN ('EXPENSE', 'INCOME')"
-        "     AND COALESCE(t.reflection_date, t.date) >= cc.year_start"
-        "     AND COALESCE(t.reflection_date, t.date) <= cc.current_date"
+        "     AND COALESCE(t.reflection_date, t.date) >= vc.year_start"
+        "     AND COALESCE(t.reflection_date, t.date) < vc.view_month_start"
         " )"
         " SELECT ap.actual_cents, ep.expected_cents"
         " FROM actual_progress ap"
@@ -2855,17 +2860,18 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr,
-                "db_get_budget_running_progress_for_current_year prepare: %s\n",
+                "db_get_budget_running_progress_for_year_before_month prepare: %s\n",
                 sqlite3_errmsg(db));
         return -1;
     }
 
     sqlite3_bind_int64(stmt, 1, category_id);
+    sqlite3_bind_text(stmt, 2, norm_month, -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_ROW) {
         fprintf(stderr,
-                "db_get_budget_running_progress_for_current_year step: %s\n",
+                "db_get_budget_running_progress_for_year_before_month step: %s\n",
                 sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
         return -1;
@@ -2878,7 +2884,7 @@ int db_get_budget_running_progress_for_current_year(sqlite3 *db,
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) {
         fprintf(stderr,
-                "db_get_budget_running_progress_for_current_year finalize: %s\n",
+                "db_get_budget_running_progress_for_year_before_month finalize: %s\n",
                 sqlite3_errmsg(db));
         return -1;
     }

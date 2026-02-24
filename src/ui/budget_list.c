@@ -266,8 +266,9 @@ static void compute_running_delta_summary(budget_list_state_t *ls) {
 
         int64_t actual_cents = 0;
         int64_t expected_cents = 0;
-        if (db_get_budget_running_progress_for_current_year(
-                ls->db, drow->row.category_id, &actual_cents, &expected_cents) < 0) {
+        if (db_get_budget_running_progress_for_year_before_month(
+                ls->db, drow->row.category_id, ls->month, &actual_cents,
+                &expected_cents) < 0) {
             had_error = true;
             continue;
         }
