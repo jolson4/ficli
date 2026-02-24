@@ -1280,7 +1280,7 @@ static void draw_related_transactions_section(budget_list_state_t *ls, WINDOW *w
 
     wattron(win, A_BOLD);
     mvwprintw(win, header_row, date_col, "%-*s", date_w, "Date");
-    mvwprintw(win, header_row, amount_col, "%-*s", amount_w, "Amount");
+    mvwprintw(win, header_row, amount_col, "%*.*s", amount_w, amount_w, "Amount");
     if (account_w > 0)
         mvwprintw(win, header_row, account_col, "%-*s", account_w, "Account");
     mvwprintw(win, header_row, details_col, "%-*s", details_w, "Details");
@@ -1759,20 +1759,22 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
 
     wattron(win, A_BOLD);
     mvwprintw(win, budgeted_header_row, category_col, "%-*s", cat_w, "Category");
-    mvwprintw(win, budgeted_header_row, budget_col, "%-*s", budget_w, "Budget");
-    mvwprintw(win, budgeted_header_row, running_col, "%-*s", running_w,
-              "Running +/-");
-    mvwprintw(win, budgeted_header_row, net_col, "%-*s", net_w, "Net");
-    mvwprintw(win, budgeted_header_row, pct_col, "%-*s", pct_w, "%");
+    mvwprintw(win, budgeted_header_row, budget_col, "%*.*s", budget_w, budget_w,
+              "Budget");
+    mvwprintw(win, budgeted_header_row, running_col, "%*.*s", running_w,
+              running_w, "Running +/-");
+    mvwprintw(win, budgeted_header_row, net_col, "%*.*s", net_w, net_w, "Net");
+    mvwprintw(win, budgeted_header_row, pct_col, "%*.*s", pct_w, pct_w, "%");
     if (bar_w > 0)
         mvwprintw(win, budgeted_header_row, bar_col, "%-*s", bar_w, "Progress");
 
     mvwprintw(win, unbudgeted_header_row, category_col, "%-*s", cat_w, "Category");
-    mvwprintw(win, unbudgeted_header_row, budget_col, "%-*s", budget_w, "Budget");
-    mvwprintw(win, unbudgeted_header_row, running_col, "%-*s", running_w,
-              "Running +/-");
-    mvwprintw(win, unbudgeted_header_row, net_col, "%-*s", net_w, "Net");
-    mvwprintw(win, unbudgeted_header_row, pct_col, "%-*s", pct_w, "%");
+    mvwprintw(win, unbudgeted_header_row, budget_col, "%*.*s", budget_w,
+              budget_w, "Budget");
+    mvwprintw(win, unbudgeted_header_row, running_col, "%*.*s", running_w,
+              running_w, "Running +/-");
+    mvwprintw(win, unbudgeted_header_row, net_col, "%*.*s", net_w, net_w, "Net");
+    mvwprintw(win, unbudgeted_header_row, pct_col, "%*.*s", pct_w, pct_w, "%");
     if (bar_w > 0)
         mvwprintw(win, unbudgeted_header_row, bar_col, "%-*s", bar_w, "Progress");
     wattroff(win, A_BOLD);
