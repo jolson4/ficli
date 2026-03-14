@@ -391,12 +391,146 @@ static bool confirm_apply_edit_changes_to_filtered(WINDOW *parent,
     return apply_filtered;
 }
 
-static bool confirm_delete(WINDOW *parent) {
+static const char *txn_list_account_name(const txn_list_state_t *ls,
+                                         int64_t account_id) {
+    if (!ls || !ls->accounts || account_id <= 0)
+        return "";
+    for (int i = 0; i < ls->account_count; i++) {
+        if (ls->accounts[i].id == account_id)
+            return ls->accounts[i].name;
+    }
+    return "";
+}
+
+static void txn_list_build_account_warning(char *dst, size_t dst_size,
+                                           const char *prefix,
+                                           const char **names, int name_count) {
+    if (!dst || dst_size == 0)
+        return;
+    dst[0] = '\0';
+    if (!prefix || !names || name_count <= 0)
+        return;
+    size_t used = (size_t)snprintf(dst, dst_size, "%s", prefix);
+    if (used >= dst_size)
+        return;
+    for (int i = 0; i < name_count; i++) {
+        const char *name = names[i] ? names[i] : "";
+        if (name[0] == '\0')
+            continue;
+        size_t remaining = dst_size - used;
+        if (remaining <= 1)
+            break;
+        int written = snprintf(dst + used, remaining, "%s%s",
+                               (used > 0 && dst[used - 1] != ' ' &&
+                                dst[used - 1] != ':')
+                                   ? ", "
+                                   : " ",
+                               name);
+        if (written < 0)
+            break;
+        used += (size_t)written;
+        if (used >= dst_size)
+            break;
+    }
+}
+
+static int txn_list_transfer_warning(const txn_list_state_t *ls,
+                                     const int64_t *ids, int id_count,
+                                     char *line1, size_t line1_size,
+                                     char *line2, size_t line2_size) {
+    if (!ls || !ids || id_count <= 0 || !line1 || line1_size == 0)
+        return 0;
+    line1[0] = '\0';
+    if (line2 && line2_size > 0)
+        line2[0] = '\0';
+
+    int transfer_count = 0;
+    int64_t acct_ids[8] = {0};
+    int acct_count = 0;
+
+    for (int i = 0; i < id_count; i++) {
+        transaction_t txn = {0};
+        if (db_get_transaction_by_id(ls->db, (int)ids[i], &txn) != 0)
+            continue;
+        if (txn.transfer_id == 0 && txn.type != TRANSACTION_TRANSFER)
+            continue;
+        transfer_count++;
+
+        int64_t counterparty_id = 0;
+        if (db_get_transfer_counterparty_account(ls->db, txn.id,
+                                                 &counterparty_id) < 0)
+            continue;
+        bool seen = false;
+        for (int j = 0; j < acct_count; j++) {
+            if (acct_ids[j] == counterparty_id) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen && acct_count < (int)(sizeof(acct_ids) / sizeof(acct_ids[0])))
+            acct_ids[acct_count++] = counterparty_id;
+    }
+
+    if (transfer_count == 0)
+        return 0;
+
+    if (transfer_count == 1 && acct_count == 1) {
+        const char *name = txn_list_account_name(ls, acct_ids[0]);
+        if (name[0] != '\0') {
+            snprintf(line1, line1_size, "Linked transfer in %-.24s will be deleted.",
+                     name);
+        } else {
+            snprintf(line1, line1_size, "Linked transfer will be deleted.");
+        }
+        return 1;
+    }
+
+    snprintf(line1, line1_size, "Linked transfers will be deleted.");
+    if (acct_count > 0 && line2 && line2_size > 0) {
+        const char *names[8];
+        int name_count = 0;
+        for (int i = 0; i < acct_count; i++) {
+            const char *name = txn_list_account_name(ls, acct_ids[i]);
+            if (name[0] != '\0')
+                names[name_count++] = name;
+        }
+        if (name_count > 0) {
+            txn_list_build_account_warning(line2, line2_size, "Accounts:",
+                                           names, name_count);
+            if (line2[0] != '\0')
+                return 2;
+        }
+    }
+    return 1;
+}
+
+static bool confirm_delete(WINDOW *parent, int txn_count, const char *line2,
+                           const char *line3) {
     int ph, pw;
     getmaxyx(parent, ph, pw);
 
-    int win_h = 7;
-    int win_w = 42;
+    int warn_lines = 0;
+    if (line2 && line2[0] != '\0')
+        warn_lines++;
+    if (line3 && line3[0] != '\0')
+        warn_lines++;
+
+    int base_w = 42;
+    int max_line = 0;
+    if (line2) {
+        int len = (int)strlen(line2);
+        if (len > max_line)
+            max_line = len;
+    }
+    if (line3) {
+        int len = (int)strlen(line3);
+        if (len > max_line)
+            max_line = len;
+    }
+    int win_h = 7 + warn_lines;
+    int win_w = base_w;
+    if (max_line + 4 > win_w)
+        win_w = max_line + 4;
     if (ph < win_h)
         win_h = ph;
     if (pw < win_w)
@@ -414,7 +548,18 @@ static bool confirm_delete(WINDOW *parent) {
     wbkgd(w, COLOR_PAIR(COLOR_FORM));
     box(w, 0, 0);
 
-    mvwprintw(w, 1, 2, "Delete transaction?");
+    if (txn_count > 1) {
+        mvwprintw(w, 1, 2, "Delete %d transactions?", txn_count);
+    } else {
+        mvwprintw(w, 1, 2, "Delete transaction?");
+    }
+    int warn_row = 2;
+    if (line2 && line2[0] != '\0') {
+        mvwprintw(w, warn_row, 2, "%s", line2);
+        warn_row++;
+    }
+    if (line3 && line3[0] != '\0')
+        mvwprintw(w, warn_row, 2, "%s", line3);
     mvwprintw(w, win_h - 2, 2, "y:Delete  n:Cancel");
     wrefresh(w);
 
@@ -1522,15 +1667,41 @@ bool txn_list_handle_input(txn_list_state_t *ls, WINDOW *parent, int ch) {
     case 'd':
         if (ls->display_count <= 0)
             return true;
-        if (confirm_delete(parent)) {
+        {
+            int64_t temp_id = ls->display[ls->cursor].id;
+            const int64_t *ids = ls->selected_count > 0 ? ls->selected_ids : &temp_id;
+            int id_count = ls->selected_count > 0 ? ls->selected_count : 1;
+
+            char warn_line1[96];
+            char warn_line2[96];
+            int warn_count = txn_list_transfer_warning(
+                ls, ids, id_count, warn_line1, sizeof(warn_line1), warn_line2,
+                sizeof(warn_line2));
+            const char *line2 = warn_count >= 1 ? warn_line1 : NULL;
+            const char *line3 = warn_count >= 2 ? warn_line2 : NULL;
+
+            if (!confirm_delete(parent, id_count, line2, line3))
+                return true;
+        }
+        {
             int delete_idx = ls->cursor;
-            int rc =
-                db_delete_transaction(ls->db, (int)ls->display[ls->cursor].id);
-            if (rc == 0) {
-                ls->next_reload_cursor = delete_idx;
-                ls->next_reload_focus_txn_id = 0;
-                ls->dirty = true;
-            } else if (rc == -2) {
+            int deleted_any = 0;
+            if (ls->selected_count > 0) {
+                for (int i = 0; i < ls->selected_count; i++) {
+                    int rc =
+                        db_delete_transaction(ls->db, (int)ls->selected_ids[i]);
+                    if (rc == 0 || rc == -2)
+                        deleted_any++;
+                }
+                txn_list_clear_selected(ls);
+            } else {
+                int rc =
+                    db_delete_transaction(ls->db, (int)ls->display[ls->cursor].id);
+                if (rc == 0 || rc == -2)
+                    deleted_any++;
+            }
+
+            if (deleted_any > 0) {
                 ls->next_reload_cursor = delete_idx;
                 ls->next_reload_focus_txn_id = 0;
                 ls->dirty = true;
