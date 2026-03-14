@@ -14,6 +14,128 @@
 #define FIELD_BUF 4096
 static const int transfer_match_date_window_days = 3;
 
+typedef struct {
+    uint64_t hash;
+    char *key;
+    int count;
+} dedup_entry_t;
+
+typedef struct {
+    dedup_entry_t *entries;
+    int capacity;
+    int size;
+} dedup_map_t;
+
+static uint64_t dedup_hash_key(const char *s) {
+    uint64_t hash = 1469598103934665603ull;
+    while (s && *s) {
+        hash ^= (unsigned char)*s++;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static int dedup_next_pow2(int v) {
+    int n = 16;
+    while (n < v && n > 0)
+        n <<= 1;
+    return n > 0 ? n : 16;
+}
+
+static void dedup_map_free(dedup_map_t *map) {
+    if (!map || !map->entries)
+        return;
+    for (int i = 0; i < map->capacity; i++) {
+        free(map->entries[i].key);
+        map->entries[i].key = NULL;
+    }
+    free(map->entries);
+    map->entries = NULL;
+    map->capacity = 0;
+    map->size = 0;
+}
+
+static bool dedup_map_init(dedup_map_t *map, int desired_capacity) {
+    if (!map)
+        return false;
+    map->capacity = dedup_next_pow2(desired_capacity);
+    map->size = 0;
+    map->entries = calloc((size_t)map->capacity, sizeof(dedup_entry_t));
+    return map->entries != NULL;
+}
+
+static bool dedup_map_grow(dedup_map_t *map) {
+    int old_cap = map->capacity;
+    dedup_entry_t *old_entries = map->entries;
+    if (!dedup_map_init(map, old_cap * 2))
+        return false;
+
+    for (int i = 0; i < old_cap; i++) {
+        if (!old_entries[i].key)
+            continue;
+        uint64_t hash = old_entries[i].hash;
+        int idx = (int)(hash & (uint64_t)(map->capacity - 1));
+        while (map->entries[idx].key)
+            idx = (idx + 1) & (map->capacity - 1);
+        map->entries[idx] = old_entries[i];
+        map->size++;
+    }
+    free(old_entries);
+    return true;
+}
+
+static bool dedup_map_add(dedup_map_t *map, const char *key) {
+    if (!map || !key)
+        return false;
+    if (!map->entries && !dedup_map_init(map, 32))
+        return false;
+    if ((map->size + 1) * 10 >= map->capacity * 7) {
+        if (!dedup_map_grow(map))
+            return false;
+    }
+
+    uint64_t hash = dedup_hash_key(key);
+    int idx = (int)(hash & (uint64_t)(map->capacity - 1));
+    while (map->entries[idx].key) {
+        if (map->entries[idx].hash == hash &&
+            strcmp(map->entries[idx].key, key) == 0) {
+            map->entries[idx].count++;
+            return true;
+        }
+        idx = (idx + 1) & (map->capacity - 1);
+    }
+
+    size_t len = strlen(key);
+    char *copy = malloc(len + 1);
+    if (!copy)
+        return false;
+    memcpy(copy, key, len + 1);
+    map->entries[idx].hash = hash;
+    map->entries[idx].key = copy;
+    map->entries[idx].count = 1;
+    map->size++;
+    return true;
+}
+
+static bool dedup_map_take(dedup_map_t *map, const char *key) {
+    if (!map || !map->entries || !key)
+        return false;
+    uint64_t hash = dedup_hash_key(key);
+    int idx = (int)(hash & (uint64_t)(map->capacity - 1));
+    while (map->entries[idx].key) {
+        if (map->entries[idx].hash == hash &&
+            strcmp(map->entries[idx].key, key) == 0) {
+            if (map->entries[idx].count > 0) {
+                map->entries[idx].count--;
+                return true;
+            }
+            return false;
+        }
+        idx = (idx + 1) & (map->capacity - 1);
+    }
+    return false;
+}
+
 // Parse one CSV line into fields[]. Each fields[i] points into buf.
 // Returns number of fields parsed.
 static int csv_parse_line(const char *line, char **fields, int max_fields,
@@ -200,6 +322,15 @@ static void strip_eol(char *line) {
     int len = (int)strlen(line);
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
         line[--len] = '\0';
+}
+
+static void build_dedup_key(const char *date, int64_t amount_cents,
+                            transaction_type_t type, const char *payee,
+                            char *out, size_t out_sz) {
+    if (!out || out_sz == 0)
+        return;
+    snprintf(out, out_sz, "%s|%lld|%d|%s", date ? date : "",
+             (long long)amount_cents, (int)type, payee ? payee : "");
 }
 
 static void trim_whitespace_in_place(char *s) {
@@ -625,20 +756,11 @@ csv_parse_result_t csv_parse_file(const char *path) {
     return result;
 }
 
-// Returns true if a CSV row matches an existing transaction (for dedup).
-// Match key: date + amount_cents + type + payee.
-static bool row_matches_txn(const csv_row_t *row, const txn_row_t *txn) {
-    return row->amount_cents == txn->amount_cents &&
-           row->type == txn->type &&
-           strcmp(row->date, txn->date) == 0 &&
-           strcmp(row->payee, txn->payee) == 0;
-}
-
 // Per-account cache of existing transactions used for dedup during import.
 typedef struct {
     int64_t account_id;
     txn_row_t *txns;
-    bool *consumed;
+    dedup_map_t dedup;
     int count;
 } acct_txn_cache_t;
 
@@ -654,7 +776,7 @@ static acct_txn_cache_t *get_acct_cache(sqlite3 *db, acct_txn_cache_t *caches,
     acct_txn_cache_t *c = &caches[*ncaches];
     c->account_id = account_id;
     c->txns = NULL;
-    c->consumed = NULL;
+    memset(&c->dedup, 0, sizeof(c->dedup));
     c->count = 0;
 
     int cnt = db_get_transactions(db, account_id, &c->txns);
@@ -665,12 +787,24 @@ static acct_txn_cache_t *get_acct_cache(sqlite3 *db, acct_txn_cache_t *caches,
     }
     c->count = cnt;
 
-    c->consumed = calloc(c->count > 0 ? c->count : 1, sizeof(bool));
-    if (!c->consumed) {
+    if (!dedup_map_init(&c->dedup, c->count * 2 + 16)) {
         free(c->txns);
         c->txns = NULL;
         c->count = 0;
         return NULL;
+    }
+
+    for (int i = 0; i < c->count; i++) {
+        char key[512];
+        build_dedup_key(c->txns[i].date, c->txns[i].amount_cents,
+                        c->txns[i].type, c->txns[i].payee, key, sizeof(key));
+        if (!dedup_map_add(&c->dedup, key)) {
+            dedup_map_free(&c->dedup);
+            free(c->txns);
+            c->txns = NULL;
+            c->count = 0;
+            return NULL;
+        }
     }
 
     (*ncaches)++;
@@ -814,6 +948,32 @@ static int maybe_autolink_imported_transfer(sqlite3 *db, int64_t txn_id,
     return 0;
 }
 
+static int begin_import_txn(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(err);
+        return -1;
+    }
+    return 0;
+}
+
+static int commit_import_txn(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, "COMMIT", NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(err);
+        return -1;
+    }
+    return 0;
+}
+
+static void rollback_import_txn(sqlite3 *db) {
+    char *err = NULL;
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, &err);
+    sqlite3_free(err);
+}
+
 void csv_parse_result_free(csv_parse_result_t *r) {
     if (!r)
         return;
@@ -846,6 +1006,13 @@ int csv_import_credit_card(sqlite3 *db, const csv_parse_result_t *r,
     }
     int ncaches = 0;
     int ret = 0;
+    bool txn_open = false;
+
+    if (begin_import_txn(db) < 0) {
+        ret = -1;
+        goto cleanup;
+    }
+    txn_open = true;
 
     for (int i = 0; i < r->row_count; i++) {
         const csv_row_t *row = &r->rows[i];
@@ -871,14 +1038,10 @@ int csv_import_credit_card(sqlite3 *db, const csv_parse_result_t *r,
         }
 
         // Check for a matching unconsumed existing transaction (dedup).
-        bool is_dup = false;
-        for (int j = 0; j < cache->count; j++) {
-            if (!cache->consumed[j] && row_matches_txn(row, &cache->txns[j])) {
-                cache->consumed[j] = true;
-                is_dup = true;
-                break;
-            }
-        }
+        char key[512];
+        build_dedup_key(row->date, row->amount_cents, row->type, row->payee, key,
+                        sizeof(key));
+        bool is_dup = dedup_map_take(&cache->dedup, key);
         if (is_dup) {
             (*skipped)++;
             continue;
@@ -914,9 +1077,19 @@ int csv_import_credit_card(sqlite3 *db, const csv_parse_result_t *r,
     }
 
 cleanup:
+    if (txn_open) {
+        if (ret == 0) {
+            if (commit_import_txn(db) < 0) {
+                rollback_import_txn(db);
+                ret = -1;
+            }
+        } else {
+            rollback_import_txn(db);
+        }
+    }
     for (int i = 0; i < ncaches; i++) {
         free(caches[i].txns);
-        free(caches[i].consumed);
+        dedup_map_free(&caches[i].dedup);
     }
     free(caches);
     free(accounts);
@@ -935,24 +1108,37 @@ int csv_import_checking(sqlite3 *db, const csv_parse_result_t *r,
         return -1;
     }
 
-    bool *consumed = calloc(nexisting > 0 ? nexisting : 1, sizeof(bool));
-    if (!consumed) {
+    dedup_map_t dedup = {0};
+    if (!dedup_map_init(&dedup, nexisting * 2 + 16)) {
         free(existing);
         return -1;
     }
+    for (int i = 0; i < nexisting; i++) {
+        char key[512];
+        build_dedup_key(existing[i].date, existing[i].amount_cents,
+                        existing[i].type, existing[i].payee, key, sizeof(key));
+        if (!dedup_map_add(&dedup, key)) {
+            dedup_map_free(&dedup);
+            free(existing);
+            return -1;
+        }
+    }
 
     int ret = 0;
+    bool txn_open = false;
+    if (begin_import_txn(db) < 0) {
+        dedup_map_free(&dedup);
+        free(existing);
+        return -1;
+    }
+    txn_open = true;
     for (int i = 0; i < r->row_count; i++) {
         const csv_row_t *row = &r->rows[i];
 
-        bool is_dup = false;
-        for (int j = 0; j < nexisting; j++) {
-            if (!consumed[j] && row_matches_txn(row, &existing[j])) {
-                consumed[j] = true;
-                is_dup = true;
-                break;
-            }
-        }
+        char key[512];
+        build_dedup_key(row->date, row->amount_cents, row->type, row->payee, key,
+                        sizeof(key));
+        bool is_dup = dedup_map_take(&dedup, key);
         if (is_dup) {
             (*skipped)++;
             continue;
@@ -987,7 +1173,18 @@ int csv_import_checking(sqlite3 *db, const csv_parse_result_t *r,
         (*imported)++;
     }
 
+    if (txn_open) {
+        if (ret == 0) {
+            if (commit_import_txn(db) < 0) {
+                rollback_import_txn(db);
+                ret = -1;
+            }
+        } else {
+            rollback_import_txn(db);
+        }
+    }
+
+    dedup_map_free(&dedup);
     free(existing);
-    free(consumed);
     return ret;
 }
