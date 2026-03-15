@@ -87,10 +87,20 @@ static int migrate_schema(sqlite3 *db) {
         "    category_id INTEGER PRIMARY KEY,"
         "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
         ");"
+        "CREATE TABLE IF NOT EXISTS budget_month_overrides ("
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    category_id INTEGER NOT NULL,"
+        "    month TEXT NOT NULL,"
+        "    limit_cents INTEGER NOT NULL,"
+        "    UNIQUE(category_id, month),"
+        "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
+        ");"
         "INSERT OR IGNORE INTO budget_filter_settings (id, mode)"
         " VALUES (1, 'EXCLUDE_SELECTED');"
         "CREATE INDEX IF NOT EXISTS idx_transactions_effective_date"
-        " ON transactions(COALESCE(reflection_date, date));");
+        " ON transactions(COALESCE(reflection_date, date));"
+        "CREATE INDEX IF NOT EXISTS idx_budget_month_overrides_month"
+        " ON budget_month_overrides(month);");
 }
 
 static int create_schema(sqlite3 *db) {
@@ -149,12 +159,22 @@ static int create_schema(sqlite3 *db) {
         "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
         ");"
 
+        "CREATE TABLE IF NOT EXISTS budget_month_overrides ("
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    category_id INTEGER NOT NULL,"
+        "    month TEXT NOT NULL,"
+        "    limit_cents INTEGER NOT NULL,"
+        "    UNIQUE(category_id, month),"
+        "    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE"
+        ");"
+
         "CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_transfer ON transactions(transfer_id);"
         "CREATE INDEX IF NOT EXISTS idx_transactions_effective_date ON transactions(COALESCE(reflection_date, date));"
         "CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);"
+        "CREATE INDEX IF NOT EXISTS idx_budget_month_overrides_month ON budget_month_overrides(month);"
         "CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);"
 
         "INSERT OR IGNORE INTO budget_filter_settings (id, mode)"

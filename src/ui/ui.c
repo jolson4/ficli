@@ -133,6 +133,7 @@ static const help_row_t help_rows[] = {
     {"r", "Jump to current month"},
     {"Enter", "Show matches / leave matches focus"},
     {"e", "Edit budget or focused transaction"},
+    {"Enter (budget edit)", "Choose save scope (onward/current month)"},
     {"f", "Open category filter panel"},
     {"Space / Enter (filter)", "Toggle selected category"},
     {"m (filter)", "Toggle include/exclude mode"},

@@ -231,6 +231,16 @@ int db_set_budget_effective(sqlite3 *db, int64_t category_id,
                             const char *effective_month_ym,
                             int64_t limit_cents);
 
+// Set a one-month budget override for month "YYYY-MM". If the exact month
+// override exists, updates it. Returns 0 success, -1 on error.
+int db_set_budget_month_override(sqlite3 *db, int64_t category_id,
+                                 const char *month_ym, int64_t limit_cents);
+
+// Clear a one-month budget override for month "YYYY-MM". Returns 0 success,
+// -1 on error.
+int db_clear_budget_month_override(sqlite3 *db, int64_t category_id,
+                                   const char *month_ym);
+
 // Fetch effective budget limit for a category in month "YYYY-MM". Returns 0
 // success, -2 when no matching rule exists, -1 on error.
 int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,

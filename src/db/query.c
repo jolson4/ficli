@@ -2676,35 +2676,53 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
         " flags AS ("
         "   SELECT p.id AS parent_id,"
         "          EXISTS("
-        "            SELECT 1 FROM budgets b"
-        "            WHERE b.category_id = p.id AND b.month <= ?"
+        "SELECT 1 FROM budget_month_overrides bo"
+        " WHERE bo.category_id=p.id AND bo.month=?"
+        "          ) OR EXISTS("
+        "SELECT 1 FROM budgets b"
+        " WHERE b.category_id=p.id AND b.month<=?"
         "          ) AS has_rule,"
         "          EXISTS("
-        "            SELECT 1"
-        "            FROM descendants dd"
-        "            JOIN allowed_categories ac ON ac.category_id = dd.category_id"
-        "            JOIN budgets b2 ON b2.category_id = dd.category_id"
-        "            WHERE dd.parent_id = p.id AND b2.month <= ?"
+        "SELECT 1"
+        " FROM descendants dd"
+        " JOIN allowed_categories ac ON ac.category_id=dd.category_id"
+        " WHERE dd.parent_id=p.id"
+        "   AND dd.category_id IN ("
+        "SELECT category_id FROM budget_month_overrides WHERE month=?"
+        " UNION"
+        " SELECT category_id FROM budgets WHERE month<=?"
+        " )"
         "          ) AS has_rollup_rule,"
         "          ("
-            "            SELECT b3.limit_cents"
-            "            FROM budgets b3"
-            "            WHERE b3.category_id = p.id AND b3.month <= ?"
-            "            ORDER BY b3.month DESC"
-            "            LIMIT 1"
+            "SELECT COALESCE(("
+            "SELECT bo3.limit_cents"
+            " FROM budget_month_overrides bo3"
+            " WHERE bo3.category_id=p.id AND bo3.month=?"
+            " LIMIT 1"
+            "), ("
+            "SELECT b3.limit_cents"
+            " FROM budgets b3"
+            " WHERE b3.category_id=p.id AND b3.month<=?"
+            " ORDER BY b3.month DESC"
+            " LIMIT 1"
+            "))"
         "          ) AS direct_limit_cents,"
         "          ("
-        "            SELECT COALESCE(SUM(COALESCE(("
-        "              SELECT b4.limit_cents"
-        "              FROM budgets b4"
-        "              WHERE b4.category_id = dd2.category_id"
-        "                AND b4.month <= ?"
-        "              ORDER BY b4.month DESC"
-        "              LIMIT 1"
-        "            ), 0)), 0)"
-        "            FROM descendants dd2"
-        "            JOIN allowed_categories ac2 ON ac2.category_id = dd2.category_id"
-        "            WHERE dd2.parent_id = p.id"
+        "SELECT COALESCE(SUM(COALESCE(("
+        "SELECT bo4.limit_cents"
+        " FROM budget_month_overrides bo4"
+        " WHERE bo4.category_id=dd2.category_id AND bo4.month=?"
+        " LIMIT 1"
+        "), ("
+        "SELECT b4.limit_cents"
+        " FROM budgets b4"
+        " WHERE b4.category_id=dd2.category_id AND b4.month<=?"
+        " ORDER BY b4.month DESC"
+        " LIMIT 1"
+        "), 0)), 0)"
+        " FROM descendants dd2"
+        " JOIN allowed_categories ac2 ON ac2.category_id=dd2.category_id"
+        " WHERE dd2.parent_id=p.id"
         "          ) AS rollup_limit_cents,"
         "          ("
         "            SELECT COUNT(*) FROM categories c WHERE c.parent_id = p.id"
@@ -2739,6 +2757,9 @@ int db_get_budget_rows_for_month(sqlite3 *db, const char *month_ym,
     sqlite3_bind_text(stmt, 3, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, norm_month, -1, SQLITE_TRANSIENT);
 
     int capacity = 16;
     int count = 0;
@@ -2868,6 +2889,11 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "        COALESCE(ms.net_spent_cents, 0),"
         "        COALESCE(ms.txn_count, 0),"
         "        COALESCE(("
+        "          SELECT bo.limit_cents"
+        "          FROM budget_month_overrides bo"
+        "          WHERE bo.category_id = r.id AND bo.month = ?"
+        "          LIMIT 1"
+        "        ), ("
         "          SELECT b.limit_cents FROM budgets b"
         "          WHERE b.category_id = r.id AND b.month <= ?"
         "          ORDER BY b.month DESC"
@@ -2875,6 +2901,12 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "        ), 0),"
         "        ("
         "          SELECT COALESCE(SUM(COALESCE(("
+        "            SELECT bo4.limit_cents"
+        "            FROM budget_month_overrides bo4"
+        "            WHERE bo4.category_id = dd2.category_id"
+        "              AND bo4.month = ?"
+        "            LIMIT 1"
+        "          ), ("
         "            SELECT b4.limit_cents"
         "            FROM budgets b4"
         "            WHERE b4.category_id = dd2.category_id"
@@ -2887,6 +2919,9 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "          WHERE dd2.root_id = r.id"
         "        ),"
         "        EXISTS("
+        "          SELECT 1 FROM budget_month_overrides bo2"
+        "          WHERE bo2.category_id = r.id AND bo2.month = ?"
+        "        ) OR EXISTS("
         "          SELECT 1 FROM budgets b2"
         "          WHERE b2.category_id = r.id AND b2.month <= ?"
         "        ),"
@@ -2894,8 +2929,14 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "          SELECT 1"
         "          FROM descendants dd"
         "          JOIN allowed_categories ac ON ac.category_id = dd.category_id"
-        "          JOIN budgets b3 ON b3.category_id = dd.category_id"
-        "          WHERE dd.root_id = r.id AND b3.month <= ?"
+        "          WHERE dd.root_id = r.id"
+        "            AND dd.category_id IN ("
+        "              SELECT category_id FROM budget_month_overrides"
+        "              WHERE month = ?"
+        "              UNION"
+        "              SELECT category_id FROM budgets"
+        "              WHERE month <= ?"
+        "            )"
         "        )"
         " FROM roots r"
         " JOIN allowed_descendant_counts adc ON adc.root_id = r.id"
@@ -2906,8 +2947,14 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
         "          SELECT 1"
         "          FROM descendants dd"
         "          JOIN allowed_categories ac ON ac.category_id = dd.category_id"
-        "          JOIN budgets b3 ON b3.category_id = dd.category_id"
-        "          WHERE dd.root_id = r.id AND b3.month <= ?"
+        "          WHERE dd.root_id = r.id"
+        "            AND dd.category_id IN ("
+        "              SELECT category_id FROM budget_month_overrides"
+        "              WHERE month = ?"
+        "              UNION"
+        "              SELECT category_id FROM budgets"
+        "              WHERE month <= ?"
+        "            )"
         "        ))"
         " ORDER BY r.name",
         -1, &stmt, NULL);
@@ -2924,6 +2971,10 @@ int db_get_budget_child_rows_for_month(sqlite3 *db, int64_t parent_category_id,
     sqlite3_bind_text(stmt, 5, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 6, norm_month, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 7, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, norm_month, -1, SQLITE_TRANSIENT);
 
     int capacity = 8;
     int count = 0;
@@ -3040,6 +3091,12 @@ int db_get_budget_running_progress_for_year_before_month(
         "   SELECT COALESCE(SUM("
         "     ("
         "       SELECT COALESCE(SUM(COALESCE(("
+        "         SELECT bo.limit_cents"
+        "         FROM budget_month_overrides bo"
+        "         WHERE bo.category_id = d.category_id"
+        "           AND bo.month = m.month_ym"
+        "         LIMIT 1"
+        "       ), ("
         "         SELECT b.limit_cents"
         "         FROM budgets b"
         "         WHERE b.category_id = d.category_id"
@@ -3117,8 +3174,31 @@ int db_set_budget_effective(sqlite3 *db, int64_t category_id,
     if (normalize_budget_month(effective_month_ym, norm_month) < 0)
         return -1;
 
-    sqlite3_stmt *stmt = NULL;
+    sqlite3_stmt *clear_override_stmt = NULL;
     int rc = sqlite3_prepare_v2(
+        db,
+        "DELETE FROM budget_month_overrides"
+        " WHERE category_id = ? AND month = ?",
+        -1, &clear_override_stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_set_budget_effective clear override prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(clear_override_stmt, 1, category_id);
+    sqlite3_bind_text(clear_override_stmt, 2, norm_month, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(clear_override_stmt);
+    sqlite3_finalize(clear_override_stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_set_budget_effective clear override step: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(
         db,
         "INSERT INTO budgets (category_id, month, limit_cents)"
         " VALUES (?, ?, ?)"
@@ -3145,6 +3225,77 @@ int db_set_budget_effective(sqlite3 *db, int64_t category_id,
     return 0;
 }
 
+int db_set_budget_month_override(sqlite3 *db, int64_t category_id,
+                                 const char *month_ym, int64_t limit_cents) {
+    if (category_id <= 0 || limit_cents < 0)
+        return -1;
+
+    char norm_month[8];
+    if (normalize_budget_month(month_ym, norm_month) < 0)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "INSERT INTO budget_month_overrides (category_id, month, limit_cents)"
+        " VALUES (?, ?, ?)"
+        " ON CONFLICT(category_id, month)"
+        " DO UPDATE SET limit_cents = excluded.limit_cents",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_set_budget_month_override prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, category_id);
+    sqlite3_bind_text(stmt, 2, norm_month, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, limit_cents);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_set_budget_month_override step: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
+int db_clear_budget_month_override(sqlite3 *db, int64_t category_id,
+                                   const char *month_ym) {
+    if (category_id <= 0)
+        return -1;
+
+    char norm_month[8];
+    if (normalize_budget_month(month_ym, norm_month) < 0)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "DELETE FROM budget_month_overrides"
+        " WHERE category_id = ? AND month = ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_clear_budget_month_override prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, category_id);
+    sqlite3_bind_text(stmt, 2, norm_month, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_clear_budget_month_override step: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
 int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,
                                   const char *month_ym,
                                   int64_t *out_limit_cents) {
@@ -3159,10 +3310,19 @@ int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(
         db,
-        "SELECT limit_cents"
-        " FROM budgets"
-        " WHERE category_id = ? AND month <= ?"
-        " ORDER BY month DESC"
+        "SELECT COALESCE(("
+        "  SELECT bo.limit_cents"
+        "  FROM budget_month_overrides bo"
+        "  WHERE bo.category_id = ?1 AND bo.month = ?2"
+        "  LIMIT 1"
+        "), ("
+        "  SELECT b.limit_cents"
+        "  FROM budgets b"
+        "  WHERE b.category_id = ?1 AND b.month <= ?2"
+        "  ORDER BY b.month DESC"
+        "  LIMIT 1"
+        "))"
+        " AS limit_cents"
         " LIMIT 1",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
@@ -3176,6 +3336,10 @@ int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,
 
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
+        if (sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
+            sqlite3_finalize(stmt);
+            return -2;
+        }
         *out_limit_cents = sqlite3_column_int64(stmt, 0);
         sqlite3_finalize(stmt);
         return 0;

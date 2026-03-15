@@ -43,6 +43,10 @@ struct budget_list_state {
     bool edit_mode;
     char edit_buf[32];
     int edit_pos;
+    bool edit_scope_pending;
+    int64_t pending_edit_cents;
+    int64_t pending_edit_category_id;
+    char pending_edit_month[8];
 
     budget_txn_row_t *related_txns;
     int related_txn_count;
@@ -1524,8 +1528,12 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     mvwprintw(win, title_row, 2, "Budgets  Month:%s", ls->month);
 
     mvwprintw(win, msg_row, 2, "%-*s", w - 4, "");
-    if (ls->message[0] != '\0')
+    if (ls->edit_mode && ls->edit_scope_pending) {
+        mvwprintw(win, msg_row, 2,
+                  "Save scope: o=This month and onward  m=Current month only  Esc=Cancel");
+    } else if (ls->message[0] != '\0') {
         mvwprintw(win, msg_row, 2, "%s", ls->message);
+    }
 
     int left = 2;
     int avail = w - 4;
@@ -1958,7 +1966,8 @@ void budget_list_draw(budget_list_state_t *ls, WINDOW *win, bool focused) {
     }
 
     budget_display_row_t *selected_row = selected_display_row(ls);
-    if (ls->edit_mode && focused && selected_row && selected_virtual_row >= 0) {
+    if (ls->edit_mode && !ls->edit_scope_pending && focused && selected_row &&
+        selected_virtual_row >= 0) {
         int cursor_col = budget_col + ls->edit_pos;
         if (cursor_col > budget_col + budget_w - 1)
             cursor_col = budget_col + budget_w - 1;
@@ -1986,6 +1995,10 @@ static void begin_inline_edit(budget_list_state_t *ls) {
     else
         ls->edit_buf[0] = '\0';
     ls->edit_pos = (int)strlen(ls->edit_buf);
+    ls->edit_scope_pending = false;
+    ls->pending_edit_cents = 0;
+    ls->pending_edit_category_id = 0;
+    ls->pending_edit_month[0] = '\0';
 }
 
 static void open_filter_panel(budget_list_state_t *ls) {
@@ -2124,6 +2137,54 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
     int selectable_count = selectable_row_count(ls);
 
     if (ls->edit_mode) {
+        if (ls->edit_scope_pending) {
+            int rc = -1;
+            if (ch == 27) {
+                ls->edit_scope_pending = false;
+                ls->edit_mode = false;
+                snprintf(ls->message, sizeof(ls->message), "Edit cancelled");
+                return true;
+            }
+
+            if (ch == '\n' || ch == 'o' || ch == 'O') {
+                rc = db_set_budget_effective(ls->db, ls->pending_edit_category_id,
+                                             ls->pending_edit_month,
+                                             ls->pending_edit_cents);
+                if (rc == 0) {
+                    ls->edit_scope_pending = false;
+                    ls->edit_mode = false;
+                    ls->dirty = true;
+                    snprintf(ls->message, sizeof(ls->message),
+                             "Saved budget for %s and onward",
+                             ls->pending_edit_month);
+                } else {
+                    snprintf(ls->message, sizeof(ls->message),
+                             "Error saving budget");
+                }
+                return true;
+            }
+
+            if (ch == 'm' || ch == 'M') {
+                rc = db_set_budget_month_override(ls->db,
+                                                  ls->pending_edit_category_id,
+                                                  ls->pending_edit_month,
+                                                  ls->pending_edit_cents);
+                if (rc == 0) {
+                    ls->edit_scope_pending = false;
+                    ls->edit_mode = false;
+                    ls->dirty = true;
+                    snprintf(ls->message, sizeof(ls->message),
+                             "Saved budget for %s only", ls->pending_edit_month);
+                } else {
+                    snprintf(ls->message, sizeof(ls->message),
+                             "Error saving budget");
+                }
+                return true;
+            }
+
+            return true;
+        }
+
         if (ch == 27) {
             ls->edit_mode = false;
             snprintf(ls->message, sizeof(ls->message), "Edit cancelled");
@@ -2142,16 +2203,11 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
                 return true;
             }
 
-            int rc = db_set_budget_effective(ls->db, selected->row.category_id,
-                                             ls->month, cents);
-            if (rc == 0) {
-                ls->edit_mode = false;
-                ls->dirty = true;
-                snprintf(ls->message, sizeof(ls->message),
-                         "Saved budget for %s and onward", ls->month);
-            } else {
-                snprintf(ls->message, sizeof(ls->message), "Error saving budget");
-            }
+            ls->edit_scope_pending = true;
+            ls->pending_edit_cents = cents;
+            ls->pending_edit_category_id = selected->row.category_id;
+            snprintf(ls->pending_edit_month, sizeof(ls->pending_edit_month), "%s",
+                     ls->month);
             return true;
         }
         if (handle_edit_key(ls, ch))
@@ -2277,8 +2333,10 @@ bool budget_list_handle_input(budget_list_state_t *ls, WINDOW *parent, int ch) {
 const char *budget_list_status_hint(const budget_list_state_t *ls) {
     if (!ls)
         return "";
+    if (ls->edit_mode && ls->edit_scope_pending)
+        return "q:Quit  o/Enter:Save onward  m:Save current month only  Esc:Cancel";
     if (ls->edit_mode)
-        return "q:Quit  Enter:Save  Esc:Cancel  Left/Right:Move cursor";
+        return "q:Quit  Enter:Choose save scope  Esc:Cancel  Left/Right:Move cursor";
     if (ls->filter_panel_open)
         return "q:Quit  Up/Down:Navigate  Space/Enter:Toggle category  m:Toggle mode  Esc/f:Close filter";
     if (ls->related_focus)
