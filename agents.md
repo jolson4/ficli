@@ -139,8 +139,9 @@ make clean    # clean build artifacts
 - [ ] Allow user to specify "This edit to the budget only applies to the current month"
 - [ ] Make edit Category popout larger
 - [x] When multi-selecting, show another header row with the count of selected transactions and the sum of their amounts, "Income", "Expense", and "Net" totals for the selected transactions ([plan](../.claude/plans/multi-select-header-totals.md))
+- [ ] Allow user to create an account when adding a new loan profile
 - [ ] Add an "Assets" view to track physical assets
-- [ ] Add a "Loans" view
+- [ ] Add a "Loans" view ([plan](../.claude/plans/loans-view-v1.md))
 - [ ] Allow user to say if a category is an "Expense" or "Income" category
 - [ ] Don't show "Income" in Credit Card account headers
 - [ ] Support adding a budget for a hidden category in budgets view (since we currenly only show categories matching transactions in the current month)

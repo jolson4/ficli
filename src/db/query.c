@@ -13,6 +13,7 @@ static const char *account_type_db_strings[] = {
 static const char *transaction_type_db_strings[] = {
     "EXPENSE", "INCOME", "TRANSFER"
 };
+static const char *loan_kind_db_strings[] = {"CAR", "MORTGAGE"};
 static const int transfer_match_date_window_days = 3;
 
 static account_type_t account_type_from_str(const char *s) {
@@ -39,6 +40,18 @@ static const char *transaction_type_to_str(transaction_type_t type) {
     if (type < 0 || type > TRANSACTION_TRANSFER)
         return "EXPENSE";
     return transaction_type_db_strings[type];
+}
+
+static loan_kind_t loan_kind_from_str(const char *s) {
+    if (s && strcmp(s, "MORTGAGE") == 0)
+        return LOAN_KIND_MORTGAGE;
+    return LOAN_KIND_CAR;
+}
+
+static const char *loan_kind_to_str(loan_kind_t kind) {
+    if (kind < LOAN_KIND_CAR || kind > LOAN_KIND_MORTGAGE)
+        return "CAR";
+    return loan_kind_db_strings[kind];
 }
 
 static const char *category_type_to_str(category_type_t type) {
@@ -202,6 +215,76 @@ static int date_add_one_day(char date[11]) {
     if (mktime(&tmv) == (time_t)-1)
         return -1;
 
+    if (strftime(date, 11, "%Y-%m-%d", &tmv) != 10)
+        return -1;
+    return 0;
+}
+
+static int date_compare_ymd(const char *a, const char *b) {
+    if (!a || !b)
+        return 0;
+    return strcmp(a, b);
+}
+
+static int date_today_local(char out[11]) {
+    if (!out)
+        return -1;
+    time_t now = time(NULL);
+    struct tm tmv;
+    if (!localtime_r(&now, &tmv))
+        return -1;
+    if (strftime(out, 11, "%Y-%m-%d", &tmv) != 10)
+        return -1;
+    return 0;
+}
+
+static int date_set_day(char date[11], int day) {
+    int y = 0, m = 0, d = 0;
+    if (parse_ymd(date, &y, &m, &d) < 0)
+        return -1;
+
+    if (day < 1)
+        day = 1;
+    if (day > 28)
+        day = 28;
+
+    struct tm tmv = {0};
+    tmv.tm_year = y - 1900;
+    tmv.tm_mon = m - 1;
+    tmv.tm_mday = day;
+    tmv.tm_hour = 12;
+    tmv.tm_isdst = -1;
+    if (mktime(&tmv) == (time_t)-1)
+        return -1;
+    if (strftime(date, 11, "%Y-%m-%d", &tmv) != 10)
+        return -1;
+    return 0;
+}
+
+static int date_add_month(char date[11], int payment_day) {
+    int y = 0, m = 0, d = 0;
+    if (parse_ymd(date, &y, &m, &d) < 0)
+        return -1;
+
+    m += 1;
+    if (m > 12) {
+        m = 1;
+        y += 1;
+    }
+
+    if (payment_day < 1)
+        payment_day = 1;
+    if (payment_day > 28)
+        payment_day = 28;
+
+    struct tm tmv = {0};
+    tmv.tm_year = y - 1900;
+    tmv.tm_mon = m - 1;
+    tmv.tm_mday = payment_day;
+    tmv.tm_hour = 12;
+    tmv.tm_isdst = -1;
+    if (mktime(&tmv) == (time_t)-1)
+        return -1;
     if (strftime(date, 11, "%Y-%m-%d", &tmv) != 10)
         return -1;
     return 0;
@@ -3497,4 +3580,309 @@ int db_get_budget_limit_for_month(sqlite3 *db, int64_t category_id,
     fprintf(stderr, "db_get_budget_limit_for_month step: %s\n",
             sqlite3_errmsg(db));
     return -1;
+}
+
+int db_get_loan_profiles(sqlite3 *db, loan_profile_t **out) {
+    if (!out)
+        return -1;
+    *out = NULL;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT lp.id, lp.account_id, a.name, lp.loan_kind, lp.start_date,"
+        "       lp.interest_rate_bps, lp.initial_principal_cents,"
+        "       lp.scheduled_payment_cents, lp.payment_day"
+        " FROM loan_profiles lp"
+        " JOIN accounts a ON a.id = lp.account_id"
+        " ORDER BY a.name COLLATE NOCASE, lp.id",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_loan_profiles prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    int cap = 16;
+    int count = 0;
+    loan_profile_t *rows = malloc((size_t)cap * sizeof(*rows));
+    if (!rows) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            loan_profile_t *tmp = realloc(rows, (size_t)cap * sizeof(*rows));
+            if (!tmp) {
+                free(rows);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
+            rows = tmp;
+        }
+
+        loan_profile_t *row = &rows[count++];
+        memset(row, 0, sizeof(*row));
+        row->id = sqlite3_column_int64(stmt, 0);
+        row->account_id = sqlite3_column_int64(stmt, 1);
+        const char *account_name = (const char *)sqlite3_column_text(stmt, 2);
+        const char *loan_kind = (const char *)sqlite3_column_text(stmt, 3);
+        const char *start_date = (const char *)sqlite3_column_text(stmt, 4);
+        snprintf(row->account_name, sizeof(row->account_name), "%s",
+                 account_name ? account_name : "");
+        row->loan_kind = loan_kind_from_str(loan_kind);
+        snprintf(row->start_date, sizeof(row->start_date), "%s",
+                 start_date ? start_date : "");
+        row->interest_rate_bps = sqlite3_column_int(stmt, 5);
+        row->initial_principal_cents = sqlite3_column_int64(stmt, 6);
+        row->scheduled_payment_cents = sqlite3_column_int64(stmt, 7);
+        row->payment_day = sqlite3_column_int(stmt, 8);
+        if (row->payment_day < 1)
+            row->payment_day = 1;
+        if (row->payment_day > 28)
+            row->payment_day = 28;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_get_loan_profiles step: %s\n", sqlite3_errmsg(db));
+        free(rows);
+        return -1;
+    }
+
+    if (count == 0) {
+        free(rows);
+        rows = NULL;
+    }
+    *out = rows;
+    return count;
+}
+
+int db_get_loan_profile_by_account(sqlite3 *db, int64_t account_id,
+                                   loan_profile_t *out) {
+    if (!out || account_id <= 0)
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT lp.id, lp.account_id, a.name, lp.loan_kind, lp.start_date,"
+        "       lp.interest_rate_bps, lp.initial_principal_cents,"
+        "       lp.scheduled_payment_cents, lp.payment_day"
+        " FROM loan_profiles lp"
+        " JOIN accounts a ON a.id = lp.account_id"
+        " WHERE lp.account_id = ?"
+        " LIMIT 1",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_loan_profile_by_account prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        out->id = sqlite3_column_int64(stmt, 0);
+        out->account_id = sqlite3_column_int64(stmt, 1);
+        const char *account_name = (const char *)sqlite3_column_text(stmt, 2);
+        const char *loan_kind = (const char *)sqlite3_column_text(stmt, 3);
+        const char *start_date = (const char *)sqlite3_column_text(stmt, 4);
+        snprintf(out->account_name, sizeof(out->account_name), "%s",
+                 account_name ? account_name : "");
+        out->loan_kind = loan_kind_from_str(loan_kind);
+        snprintf(out->start_date, sizeof(out->start_date), "%s",
+                 start_date ? start_date : "");
+        out->interest_rate_bps = sqlite3_column_int(stmt, 5);
+        out->initial_principal_cents = sqlite3_column_int64(stmt, 6);
+        out->scheduled_payment_cents = sqlite3_column_int64(stmt, 7);
+        out->payment_day = sqlite3_column_int(stmt, 8);
+        if (out->payment_day < 1)
+            out->payment_day = 1;
+        if (out->payment_day > 28)
+            out->payment_day = 28;
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE)
+        return -2;
+
+    fprintf(stderr, "db_get_loan_profile_by_account step: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+}
+
+int db_upsert_loan_profile(sqlite3 *db, const loan_profile_t *profile) {
+    if (!profile || profile->account_id <= 0)
+        return -1;
+    if (profile->initial_principal_cents <= 0 ||
+        profile->scheduled_payment_cents <= 0 || profile->interest_rate_bps < 0)
+        return -1;
+
+    char norm_start_date[11];
+    if (normalize_txn_date(profile->start_date, norm_start_date) < 0)
+        return -1;
+
+    int payment_day = profile->payment_day;
+    if (payment_day < 1)
+        payment_day = 1;
+    if (payment_day > 28)
+        payment_day = 28;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "INSERT INTO loan_profiles (account_id, loan_kind, start_date,"
+        " interest_rate_bps, initial_principal_cents, scheduled_payment_cents,"
+        " payment_day, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
+        " ON CONFLICT(account_id) DO UPDATE SET"
+        "   loan_kind = excluded.loan_kind,"
+        "   start_date = excluded.start_date,"
+        "   interest_rate_bps = excluded.interest_rate_bps,"
+        "   initial_principal_cents = excluded.initial_principal_cents,"
+        "   scheduled_payment_cents = excluded.scheduled_payment_cents,"
+        "   payment_day = excluded.payment_day,"
+        "   updated_at = CURRENT_TIMESTAMP",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_upsert_loan_profile prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, profile->account_id);
+    sqlite3_bind_text(stmt, 2, loan_kind_to_str(profile->loan_kind), -1,
+                      SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, norm_start_date, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, profile->interest_rate_bps);
+    sqlite3_bind_int64(stmt, 5, profile->initial_principal_cents);
+    sqlite3_bind_int64(stmt, 6, profile->scheduled_payment_cents);
+    sqlite3_bind_int(stmt, 7, payment_day);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_upsert_loan_profile step: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
+int db_delete_loan_profile(sqlite3 *db, int64_t account_id) {
+    if (account_id <= 0)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db, "DELETE FROM loan_profiles WHERE account_id = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_delete_loan_profile prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_delete_loan_profile step: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    if (sqlite3_changes(db) <= 0)
+        return -2;
+    return 0;
+}
+
+int db_get_next_loan_payment_date(sqlite3 *db, int64_t account_id,
+                                  char out_date[11]) {
+    if (!out_date || account_id <= 0)
+        return -1;
+    out_date[0] = '\0';
+
+    loan_profile_t profile = {0};
+    int rc = db_get_loan_profile_by_account(db, account_id, &profile);
+    if (rc != 0)
+        return rc;
+
+    char anchor[11];
+    snprintf(anchor, sizeof(anchor), "%s", profile.start_date);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(
+        db,
+        "SELECT COALESCE(reflection_date, date)"
+        " FROM transactions"
+        " WHERE account_id = ?"
+        " ORDER BY COALESCE(reflection_date, date) DESC, id DESC"
+        " LIMIT 1",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_next_loan_payment_date prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const char *latest = (const char *)sqlite3_column_text(stmt, 0);
+        if (latest && latest[0] != '\0')
+            snprintf(anchor, sizeof(anchor), "%s", latest);
+    } else if (rc != SQLITE_DONE) {
+        fprintf(stderr, "db_get_next_loan_payment_date step: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    sqlite3_finalize(stmt);
+
+    char next[11];
+    snprintf(next, sizeof(next), "%s", anchor);
+    if (date_set_day(next, profile.payment_day) < 0)
+        return -1;
+    if (date_compare_ymd(next, anchor) <= 0) {
+        if (date_add_month(next, profile.payment_day) < 0)
+            return -1;
+    }
+
+    char today[11];
+    if (date_today_local(today) < 0)
+        return -1;
+    while (date_compare_ymd(next, today) < 0) {
+        if (date_add_month(next, profile.payment_day) < 0)
+            return -1;
+    }
+
+    snprintf(out_date, 11, "%s", next);
+    return 0;
+}
+
+int64_t db_enact_loan_payment(sqlite3 *db, int64_t account_id) {
+    if (account_id <= 0)
+        return -1;
+
+    loan_profile_t profile = {0};
+    int rc = db_get_loan_profile_by_account(db, account_id, &profile);
+    if (rc != 0)
+        return (rc == -2) ? -2 : -1;
+
+    char next_date[11];
+    rc = db_get_next_loan_payment_date(db, account_id, next_date);
+    if (rc != 0)
+        return (rc == -2) ? -2 : -1;
+
+    transaction_t txn = {0};
+    txn.amount_cents = profile.scheduled_payment_cents;
+    txn.type = TRANSACTION_EXPENSE;
+    txn.account_id = account_id;
+    txn.category_id = 0;
+    snprintf(txn.date, sizeof(txn.date), "%s", next_date);
+    txn.reflection_date[0] = '\0';
+    snprintf(txn.payee, sizeof(txn.payee), "Loan Payment");
+    snprintf(txn.description, sizeof(txn.description), "Scheduled %s payment",
+             profile.loan_kind == LOAN_KIND_MORTGAGE ? "mortgage" : "car loan");
+
+    return db_insert_transaction(db, &txn);
 }

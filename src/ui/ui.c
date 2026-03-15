@@ -7,6 +7,7 @@
 #include "ui/error_popup.h"
 #include "ui/form.h"
 #include "ui/import_dialog.h"
+#include "ui/loan_list.h"
 #include "ui/report_list.h"
 #include "ui/resize.h"
 #include "ui/txn_list.h"
@@ -51,6 +52,7 @@ static struct {
     bool running;
     txn_list_state_t *txn_list;
     account_list_state_t *account_list;
+    loan_list_state_t *loan_list;
     category_list_state_t *category_list;
     budget_list_state_t *budget_list;
     report_list_state_t *report_list;
@@ -118,6 +120,14 @@ static const help_row_t help_rows[] = {
     {"e", "Edit selected category"},
     {"d", "Delete selected category (can reassign transactions)"},
     {"\u2190 / \u2192", "Change type"},
+
+    {"", ""},
+    {NULL, "Loans"},
+    {"n", "Add loan profile"},
+    {"e", "Edit selected profile"},
+    {"d", "Delete selected profile"},
+    {"Enter", "Enact next payment (phantom row)"},
+    {"1-9", "Switch loan profile"},
 
     {"", ""},
     {NULL, "Accounts"},
@@ -526,6 +536,11 @@ static void ui_draw_content(void) {
         if (state.account_list)
             account_list_draw(state.account_list, state.content,
                               state.content_focused);
+    } else if (state.current_screen == SCREEN_LOANS) {
+        if (!state.loan_list)
+            state.loan_list = loan_list_create(state.db);
+        if (state.loan_list)
+            loan_list_draw(state.loan_list, state.content, state.content_focused);
     } else if (state.current_screen == SCREEN_BUDGETS) {
         if (!state.budget_list)
             state.budget_list = budget_list_create(state.db);
@@ -565,6 +580,9 @@ static void ui_draw_status(void) {
                state.current_screen == SCREEN_ACCOUNTS && state.account_list) {
         mvwprintw(state.status, 0, 1, "%s",
                   account_list_status_hint(state.account_list));
+    } else if (state.content_focused && state.current_screen == SCREEN_LOANS &&
+               state.loan_list) {
+        mvwprintw(state.status, 0, 1, "%s", loan_list_status_hint(state.loan_list));
     } else if (state.content_focused &&
                state.current_screen == SCREEN_BUDGETS && state.budget_list) {
         mvwprintw(state.status, 0, 1, "%s",
@@ -1210,6 +1228,11 @@ static void ui_handle_input(int ch) {
                     (ch == 'e' || ch == 'c' || ch == 'd' || ch == 'D')) {
                     report_list_mark_dirty(state.report_list);
                 }
+                if (state.loan_list &&
+                    (ch == 'e' || ch == 'c' || ch == 'd' || ch == 'D' ||
+                     ch == 'a')) {
+                    loan_list_mark_dirty(state.loan_list);
+                }
                 return;
             }
         }
@@ -1227,6 +1250,21 @@ static void ui_handle_input(int ch) {
                 if (account_changed && state.report_list) {
                     report_list_mark_dirty(state.report_list);
                 }
+                if (account_changed && state.loan_list) {
+                    loan_list_mark_dirty(state.loan_list);
+                }
+                return;
+            }
+        }
+        if (state.current_screen == SCREEN_LOANS && state.loan_list) {
+            if (loan_list_handle_input(state.loan_list, state.content, ch)) {
+                bool loan_changed = loan_list_consume_changed(state.loan_list);
+                if (loan_changed && state.txn_list)
+                    txn_list_mark_dirty(state.txn_list);
+                if (loan_changed && state.budget_list)
+                    budget_list_mark_dirty(state.budget_list);
+                if (loan_changed && state.report_list)
+                    report_list_mark_dirty(state.report_list);
                 return;
             }
         }
@@ -1285,6 +1323,8 @@ static void ui_handle_input(int ch) {
         state.current_screen = state.sidebar_sel;
         state.content_focused =
             screen_info[state.current_screen].content_focusable;
+        if (state.current_screen == SCREEN_LOANS && state.loan_list)
+            loan_list_focus_add_button(state.loan_list);
         break;
     case 'a': {
         transaction_t txn = {0};
@@ -1296,6 +1336,8 @@ static void ui_handle_input(int ch) {
             budget_list_mark_dirty(state.budget_list);
         if (res == FORM_SAVED && state.report_list)
             report_list_mark_dirty(state.report_list);
+        if (res == FORM_SAVED && state.loan_list)
+            loan_list_mark_dirty(state.loan_list);
     }
         ui_touch_layout_windows();
         break;
@@ -1310,6 +1352,8 @@ static void ui_handle_input(int ch) {
             budget_list_mark_dirty(state.budget_list);
         if (n > 0 && state.report_list)
             report_list_mark_dirty(state.report_list);
+        if (n > 0 && state.loan_list)
+            loan_list_mark_dirty(state.loan_list);
         ui_touch_layout_windows();
     } break;
     case 'L': {
@@ -1330,6 +1374,8 @@ static void ui_handle_input(int ch) {
             budget_list_mark_dirty(state.budget_list);
         if (result.linked > 0 && state.report_list)
             report_list_mark_dirty(state.report_list);
+        if (result.linked > 0 && state.loan_list)
+            loan_list_mark_dirty(state.loan_list);
 
         char line1[160];
         char line2[160];
@@ -1398,6 +1444,7 @@ void ui_run(sqlite3 *db) {
     state.running = true;
     state.txn_list = NULL;
     state.account_list = NULL;
+    state.loan_list = NULL;
     state.category_list = NULL;
     state.budget_list = NULL;
     state.report_list = NULL;
@@ -1430,6 +1477,8 @@ void ui_run(sqlite3 *db) {
     state.txn_list = NULL;
     account_list_destroy(state.account_list);
     state.account_list = NULL;
+    loan_list_destroy(state.loan_list);
+    state.loan_list = NULL;
     category_list_destroy(state.category_list);
     state.category_list = NULL;
     budget_list_destroy(state.budget_list);

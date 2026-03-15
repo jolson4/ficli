@@ -19,6 +19,49 @@ int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type, co
 // Returns 0 on success, -2 on uniqueness conflict, -1 on error.
 int db_update_account(sqlite3 *db, const account_t *account);
 
+typedef enum {
+    LOAN_KIND_CAR = 0,
+    LOAN_KIND_MORTGAGE = 1,
+} loan_kind_t;
+
+typedef struct {
+    int64_t id;
+    int64_t account_id;
+    char account_name[64];
+    loan_kind_t loan_kind;
+    char start_date[11];
+    int interest_rate_bps;
+    int64_t initial_principal_cents;
+    int64_t scheduled_payment_cents;
+    int payment_day;
+} loan_profile_t;
+
+// Fetch loan profiles with account names. Caller frees *out.
+// Returns count, -1 on error.
+int db_get_loan_profiles(sqlite3 *db, loan_profile_t **out);
+
+// Fetch one loan profile by account id. Returns 0 success, -2 not found, -1
+// on error.
+int db_get_loan_profile_by_account(sqlite3 *db, int64_t account_id,
+                                   loan_profile_t *out);
+
+// Insert or update loan profile by account id. Returns 0 on success, -1 on
+// error.
+int db_upsert_loan_profile(sqlite3 *db, const loan_profile_t *profile);
+
+// Delete loan profile by account id. Returns 0 success, -2 not found, -1 on
+// error.
+int db_delete_loan_profile(sqlite3 *db, int64_t account_id);
+
+// Compute next payment date for a loan account as "YYYY-MM-DD". Returns 0
+// success, -2 not found, -1 on error.
+int db_get_next_loan_payment_date(sqlite3 *db, int64_t account_id,
+                                  char out_date[11]);
+
+// Enact the next scheduled loan payment as an EXPENSE transaction. Returns
+// inserted transaction id, -2 not found, -1 on error.
+int64_t db_enact_loan_payment(sqlite3 *db, int64_t account_id);
+
 // Fetch categories by type. Produces "Parent:Child" display names via JOIN.
 // Caller frees *out. Returns count, -1 on error.
 int db_get_categories(sqlite3 *db, category_type_t type, category_t **out);
