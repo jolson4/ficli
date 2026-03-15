@@ -932,14 +932,11 @@ int db_get_account_month_net_cents(sqlite3 *db, int64_t account_id,
         "SELECT COALESCE(SUM(CASE"
         "  WHEN type = 'INCOME' THEN amount_cents"
         "  WHEN type = 'EXPENSE' THEN -amount_cents"
-        "  WHEN type = 'TRANSFER' THEN CASE"
-        "    WHEN transfer_id IS NOT NULL AND id = transfer_id THEN -amount_cents"
-        "    ELSE amount_cents"
-        "  END"
         "  ELSE 0"
         " END), 0)"
         " FROM transactions"
         " WHERE account_id = ?"
+        "   AND transfer_id IS NULL"
         "   AND COALESCE(reflection_date, date) >= date('now', 'localtime', 'start of month')"
         "   AND COALESCE(reflection_date, date) <= date('now', 'localtime')",
         -1, &stmt, NULL);
@@ -976,6 +973,7 @@ int db_get_account_month_income_cents(sqlite3 *db, int64_t account_id,
         " FROM transactions"
         " WHERE account_id = ?"
         "   AND type = 'INCOME'"
+        "   AND transfer_id IS NULL"
         "   AND COALESCE(reflection_date, date) >= date('now', 'localtime', 'start of month')"
         "   AND COALESCE(reflection_date, date) <= date('now', 'localtime')",
         -1, &stmt, NULL);
@@ -1012,6 +1010,7 @@ int db_get_account_month_expense_cents(sqlite3 *db, int64_t account_id,
         " FROM transactions"
         " WHERE account_id = ?"
         "   AND type = 'EXPENSE'"
+        "   AND transfer_id IS NULL"
         "   AND COALESCE(reflection_date, date) >= date('now', 'localtime', 'start of month')"
         "   AND COALESCE(reflection_date, date) <= date('now', 'localtime')",
         -1, &stmt, NULL);
