@@ -4,6 +4,7 @@
 #include "ui/budget_list.h"
 #include "ui/category_list.h"
 #include "ui/colors.h"
+#include "ui/dashboard_list.h"
 #include "ui/error_popup.h"
 #include "ui/form.h"
 #include "ui/import_dialog.h"
@@ -50,6 +51,7 @@ static struct {
     int sidebar_sel;
     bool content_focused;
     bool running;
+    dashboard_list_state_t *dashboard_list;
     txn_list_state_t *txn_list;
     account_list_state_t *account_list;
     loan_list_state_t *loan_list;
@@ -652,7 +654,13 @@ static void ui_draw_content(void) {
     werase(state.content);
     box(state.content, 0, 0);
 
-    if (state.current_screen == SCREEN_TRANSACTIONS) {
+    if (state.current_screen == SCREEN_DASHBOARD) {
+        if (!state.dashboard_list)
+            state.dashboard_list = dashboard_list_create(state.db);
+        if (state.dashboard_list)
+            dashboard_list_draw(state.dashboard_list, state.content,
+                                state.content_focused);
+    } else if (state.current_screen == SCREEN_TRANSACTIONS) {
         if (!state.txn_list)
             state.txn_list = txn_list_create(state.db);
         if (state.txn_list)
@@ -1366,6 +1374,11 @@ static void ui_handle_input(int ch) {
                      ch == 'a')) {
                     loan_list_mark_dirty(state.loan_list);
                 }
+                if (state.dashboard_list &&
+                    (ch == 'e' || ch == 'c' || ch == 'd' || ch == 'D' ||
+                     ch == 'a')) {
+                    dashboard_list_mark_dirty(state.dashboard_list);
+                }
                 return;
             }
         }
@@ -1386,6 +1399,9 @@ static void ui_handle_input(int ch) {
                 if (account_changed && state.loan_list) {
                     loan_list_mark_dirty(state.loan_list);
                 }
+                if (account_changed && state.dashboard_list) {
+                    dashboard_list_mark_dirty(state.dashboard_list);
+                }
                 return;
             }
         }
@@ -1398,6 +1414,8 @@ static void ui_handle_input(int ch) {
                     budget_list_mark_dirty(state.budget_list);
                 if (loan_changed && state.report_list)
                     report_list_mark_dirty(state.report_list);
+                if (loan_changed && state.dashboard_list)
+                    dashboard_list_mark_dirty(state.dashboard_list);
                 return;
             }
         }
@@ -1414,6 +1432,9 @@ static void ui_handle_input(int ch) {
                 }
                 if (category_changed && state.report_list) {
                     report_list_mark_dirty(state.report_list);
+                }
+                if (category_changed && state.dashboard_list) {
+                    dashboard_list_mark_dirty(state.dashboard_list);
                 }
                 return;
             }
@@ -1471,6 +1492,8 @@ static void ui_handle_input(int ch) {
             report_list_mark_dirty(state.report_list);
         if (res == FORM_SAVED && state.loan_list)
             loan_list_mark_dirty(state.loan_list);
+        if (res == FORM_SAVED && state.dashboard_list)
+            dashboard_list_mark_dirty(state.dashboard_list);
     }
         ui_touch_layout_windows();
         break;
@@ -1487,6 +1510,8 @@ static void ui_handle_input(int ch) {
             report_list_mark_dirty(state.report_list);
         if (n > 0 && state.loan_list)
             loan_list_mark_dirty(state.loan_list);
+        if (n > 0 && state.dashboard_list)
+            dashboard_list_mark_dirty(state.dashboard_list);
         ui_touch_layout_windows();
     } break;
     case 'L': {
@@ -1509,6 +1534,8 @@ static void ui_handle_input(int ch) {
             report_list_mark_dirty(state.report_list);
         if (result.linked > 0 && state.loan_list)
             loan_list_mark_dirty(state.loan_list);
+        if (result.linked > 0 && state.dashboard_list)
+            dashboard_list_mark_dirty(state.dashboard_list);
 
         char line1[160];
         char line2[160];
@@ -1575,6 +1602,7 @@ void ui_run(sqlite3 *db) {
     state.sidebar_sel = 0;
     state.content_focused = false;
     state.running = true;
+    state.dashboard_list = NULL;
     state.txn_list = NULL;
     state.account_list = NULL;
     state.loan_list = NULL;
@@ -1608,6 +1636,8 @@ void ui_run(sqlite3 *db) {
 
     txn_list_destroy(state.txn_list);
     state.txn_list = NULL;
+    dashboard_list_destroy(state.dashboard_list);
+    state.dashboard_list = NULL;
     account_list_destroy(state.account_list);
     state.account_list = NULL;
     loan_list_destroy(state.loan_list);

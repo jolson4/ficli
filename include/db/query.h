@@ -295,6 +295,15 @@ int db_get_report_transactions(sqlite3 *db, report_group_t group,
                                report_period_t period, const char *label,
                                budget_txn_row_t **out);
 
+// Fetch global income/expense/net totals for a trailing day window ending
+// today (localtime), using effective dates and split postings.
+// `days=365` covers today and the previous 364 days.
+// Returns 0 on success, -1 on error.
+int db_get_flow_totals_last_days(sqlite3 *db, int days,
+                                 int64_t *out_income_cents,
+                                 int64_t *out_expense_cents,
+                                 int64_t *out_net_cents);
+
 typedef enum {
     BUDGET_CATEGORY_FILTER_EXCLUDE_SELECTED = 0,
     BUDGET_CATEGORY_FILTER_INCLUDE_SELECTED = 1

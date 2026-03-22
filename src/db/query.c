@@ -1806,6 +1806,75 @@ int db_get_report_transactions(sqlite3 *db, report_group_t group,
     return count;
 }
 
+int db_get_flow_totals_last_days(sqlite3 *db, int days,
+                                 int64_t *out_income_cents,
+                                 int64_t *out_expense_cents,
+                                 int64_t *out_net_cents) {
+    if (!out_income_cents || !out_expense_cents || !out_net_cents || days <= 0)
+        return -1;
+
+    *out_income_cents = 0;
+    *out_expense_cents = 0;
+    *out_net_cents = 0;
+
+    char offset[32];
+    snprintf(offset, sizeof(offset), "-%d days", days - 1);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "WITH tx_flags AS ("
+        "  SELECT t.id, EXISTS("
+        "    SELECT 1 FROM transaction_splits ts WHERE ts.transaction_id = t.id"
+        "  ) AS has_splits"
+        "  FROM transactions t"
+        "),"
+        "postings AS ("
+        "  SELECT t.id AS txn_id, t.type, t.amount_cents,"
+        "         COALESCE(t.reflection_date, t.date) AS effective_date"
+        "  FROM transactions t"
+        "  JOIN tx_flags f ON f.id = t.id"
+        "  WHERE t.type IN ('EXPENSE', 'INCOME') AND f.has_splits = 0"
+        "  UNION ALL"
+        "  SELECT t.id AS txn_id, t.type, ts.amount_cents,"
+        "         COALESCE(t.reflection_date, t.date) AS effective_date"
+        "  FROM transactions t"
+        "  JOIN tx_flags f ON f.id = t.id"
+        "  JOIN transaction_splits ts ON ts.transaction_id = t.id"
+        "  WHERE t.type IN ('EXPENSE', 'INCOME') AND f.has_splits = 1"
+        ")"
+        "SELECT COALESCE(SUM(CASE WHEN p.type = 'INCOME' THEN p.amount_cents"
+        "                         ELSE 0 END), 0),"
+        "       COALESCE(SUM(CASE WHEN p.type = 'EXPENSE' THEN p.amount_cents"
+        "                         ELSE 0 END), 0),"
+        "       COALESCE(SUM(CASE WHEN p.type = 'INCOME' THEN p.amount_cents"
+        "                         ELSE -p.amount_cents END), 0)"
+        " FROM postings p"
+        " WHERE p.effective_date >= date('now', 'localtime', ?)"
+        "   AND p.effective_date <= date('now', 'localtime')",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_flow_totals_last_days prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, offset, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "db_get_flow_totals_last_days step: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    *out_income_cents = sqlite3_column_int64(stmt, 0);
+    *out_expense_cents = sqlite3_column_int64(stmt, 1);
+    *out_net_cents = sqlite3_column_int64(stmt, 2);
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
 int db_get_budget_transactions_for_month(sqlite3 *db, int64_t category_id,
                                          const char *month_ym,
                                          budget_txn_row_t **out) {
