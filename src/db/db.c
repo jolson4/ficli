@@ -37,6 +37,35 @@ static int exec_sql(sqlite3 *db, const char *sql) {
     return 0;
 }
 
+static int apply_encryption_key(sqlite3 *db, const char *key) {
+    char *pragma_sql = sqlite3_mprintf("PRAGMA key = '%q';", key);
+    if (!pragma_sql) {
+        return -1;
+    }
+
+    char *err_msg = NULL;
+    int rc = sqlite3_exec(db, pragma_sql, NULL, NULL, &err_msg);
+    sqlite3_free(pragma_sql);
+    if (rc != SQLITE_OK) {
+        sqlite3_free(err_msg);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int verify_encryption_key(sqlite3 *db) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master;", -1,
+                                &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return -1;
+    }
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_ROW) ? 0 : -1;
+}
+
 static bool is_new_database(sqlite3 *db) {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
@@ -331,7 +360,7 @@ static int seed_defaults(sqlite3 *db) {
     return exec_sql(db, seed_sql);
 }
 
-sqlite3 *db_init(const char *path) {
+sqlite3 *db_init(const char *path, const char *key) {
     // Extract directory from path and ensure it exists
     char dir[512];
     snprintf(dir, sizeof(dir), "%s", path);
@@ -352,8 +381,21 @@ sqlite3 *db_init(const char *path) {
         return NULL;
     }
 
+    if (!key || key[0] == '\0') {
+        fprintf(stderr, "Database encryption key is missing\n");
+        sqlite3_close(db);
+        return NULL;
+    }
+
+    if (apply_encryption_key(db, key) != 0 || verify_encryption_key(db) != 0) {
+        fprintf(stderr, "Failed to unlock encrypted database\n");
+        sqlite3_close(db);
+        return NULL;
+    }
+
     // Enable foreign key enforcement
     exec_sql(db, "PRAGMA foreign_keys = ON;");
+    exec_sql(db, "PRAGMA secure_delete = ON;");
 
     bool new_db = is_new_database(db);
 

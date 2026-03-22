@@ -3,7 +3,7 @@
 
 #include <sqlite3.h>
 
-sqlite3 *db_init(const char *path);
+sqlite3 *db_init(const char *path, const char *key);
 void db_close(sqlite3 *db);
 
 #endif

@@ -478,6 +478,137 @@ static void ui_draw_too_small_screen(void) {
     doupdate();
 }
 
+static void ui_draw_password_prompt(const char *error_message,
+                                    const char *masked_value, int cursor_x) {
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    int win_w = 64;
+    int win_h = 11;
+    if (win_w > cols - 2)
+        win_w = cols - 2;
+    if (win_h > rows - 2)
+        win_h = rows - 2;
+    if (win_w < 30)
+        win_w = cols;
+    if (win_h < 8)
+        win_h = rows;
+
+    int starty = (rows - win_h) / 2;
+    int startx = (cols - win_w) / 2;
+    if (starty < 0)
+        starty = 0;
+    if (startx < 0)
+        startx = 0;
+
+    werase(stdscr);
+    wbkgd(stdscr, COLOR_PAIR(COLOR_NORMAL));
+
+    WINDOW *win = newwin(win_h, win_w, starty, startx);
+    if (!win) {
+        wnoutrefresh(stdscr);
+        doupdate();
+        return;
+    }
+
+    wbkgd(win, COLOR_PAIR(COLOR_FORM));
+    box(win, 0, 0);
+
+    wattron(win, A_BOLD);
+    mvwprintw(win, 1, 2, "Enter encryption password");
+    wattroff(win, A_BOLD);
+
+    if (error_message && error_message[0] != '\0') {
+        wattron(win, COLOR_PAIR(COLOR_ERROR));
+        mvwprintw(win, 2, 2, "%.*s", win_w - 4, error_message);
+        wattroff(win, COLOR_PAIR(COLOR_ERROR));
+    }
+
+    int field_y = 5;
+    int field_x = 2;
+    int field_w = win_w - 4;
+    if (field_w < 1)
+        field_w = 1;
+    mvwprintw(win, 4, 2, "Password:");
+    mvwhline(win, field_y, field_x, ' ', field_w);
+    mvwprintw(win, field_y, field_x, "%.*s", field_w, masked_value);
+    mvwprintw(win, win_h - 2, 2, "Enter: Save  Esc/Ctrl+C: Quit");
+
+    wnoutrefresh(stdscr);
+    wnoutrefresh(win);
+    doupdate();
+
+    int cursor_col = startx + field_x + cursor_x;
+    int cursor_row = starty + field_y;
+    if (cursor_col >= startx + win_w - 1)
+        cursor_col = startx + win_w - 2;
+    move(cursor_row, cursor_col);
+
+    delwin(win);
+}
+
+bool ui_prompt_encryption_password(const char *error_message, char *out,
+                                   size_t out_sz) {
+    if (!out || out_sz == 0)
+        return false;
+
+    char value[256] = {0};
+    int len = 0;
+    curs_set(1);
+
+    while (1) {
+        char masked[256] = {0};
+        for (int i = 0; i < len && i < (int)sizeof(masked) - 1; i++)
+            masked[i] = '*';
+
+        ui_draw_password_prompt(error_message, masked, len);
+
+        int ch = getch();
+        if (ch == KEY_RESIZE)
+            continue;
+        if (ch == 27) {
+            timeout(30);
+            int next = getch();
+            timeout(-1);
+            if (next == ERR) {
+                curs_set(0);
+                return false;
+            }
+
+            while (next != ERR && next != '~' && !(next >= 'A' && next <= 'Z') &&
+                   !(next >= 'a' && next <= 'z')) {
+                timeout(0);
+                next = getch();
+            }
+            timeout(-1);
+            continue;
+        }
+        if (ch == 3) {
+            curs_set(0);
+            return false;
+        }
+        if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+            if (len == 0)
+                continue;
+            snprintf(out, out_sz, "%s", value);
+            memset(value, 0, sizeof(value));
+            curs_set(0);
+            return true;
+        }
+        if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (len > 0) {
+                len--;
+                value[len] = '\0';
+            }
+            continue;
+        }
+        if (ch >= 32 && ch <= 126 && len < (int)sizeof(value) - 1) {
+            value[len++] = (char)ch;
+            value[len] = '\0';
+        }
+    }
+}
+
 static void ui_touch_layout_windows(void) {
     if (!state.layout_ready)
         return;
