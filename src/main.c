@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int ensure_dir_exists(const char *path) {
@@ -109,6 +110,40 @@ static int write_key_file(const char *path, const char *key) {
     return 0;
 }
 
+static int read_key_from_1password(char *out, size_t out_sz) {
+    if (!out || out_sz == 0) {
+        return -1;
+    }
+
+    FILE *pipe = popen("op read 'op://Private/Ficli/password' 2>/dev/null", "r");
+    if (!pipe) {
+        return -1;
+    }
+
+    char buf[256] = {0};
+    if (!fgets(buf, sizeof(buf), pipe)) {
+        pclose(pipe);
+        return -1;
+    }
+
+    int status = pclose(pipe);
+    if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        memset(buf, 0, sizeof(buf));
+        return -1;
+    }
+
+    size_t len = strcspn(buf, "\r\n");
+    buf[len] = '\0';
+    if (buf[0] == '\0') {
+        memset(buf, 0, sizeof(buf));
+        return -1;
+    }
+
+    snprintf(out, out_sz, "%s", buf);
+    memset(buf, 0, sizeof(buf));
+    return 0;
+}
+
 int main(void) {
     // Build the database path: ~/.local/share/ficli/ficli.db
     const char *home = getenv("HOME");
@@ -127,14 +162,27 @@ int main(void) {
     }
 
     char key[256] = {0};
-    bool has_saved_key = (read_key_file(key_path, key, sizeof(key)) == 0);
+    char saved_key[256] = {0};
+    bool has_saved_key =
+        (read_key_file(key_path, saved_key, sizeof(saved_key)) == 0);
     const char *prompt_error = NULL;
 
     ui_init();
 
     sqlite3 *db = NULL;
-    if (has_saved_key) {
+    if (read_key_from_1password(key, sizeof(key)) == 0) {
         db = db_init(db_path, key);
+        if (!db) {
+            prompt_error =
+                "1Password password failed. Enter a replacement.";
+        }
+    }
+
+    if (has_saved_key) {
+        if (!db) {
+            snprintf(key, sizeof(key), "%s", saved_key);
+            db = db_init(db_path, key);
+        }
         if (!db) {
             prompt_error = "Saved password failed. Enter a replacement.";
         }
@@ -162,6 +210,7 @@ int main(void) {
     }
 
     memset(key, 0, sizeof(key));
+    memset(saved_key, 0, sizeof(saved_key));
 
     if (!db) {
         ui_cleanup();
