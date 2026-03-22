@@ -7,7 +7,8 @@
 #include <limits.h>
 
 static const char *account_type_db_strings[] = {
-    "CASH", "CHECKING", "SAVINGS", "CREDIT_CARD", "PHYSICAL_ASSET", "INVESTMENT"
+    "CASH", "CHECKING", "SAVINGS", "CREDIT_CARD", "PHYSICAL_ASSET", "INVESTMENT",
+    "LOAN"
 };
 
 static const char *transaction_type_db_strings[] = {
@@ -15,6 +16,11 @@ static const char *transaction_type_db_strings[] = {
 };
 static const char *loan_kind_db_strings[] = {"CAR", "MORTGAGE"};
 static const int transfer_match_date_window_days = 3;
+
+static int loan_get_principal_paid_before_date(sqlite3 *db, int64_t account_id,
+                                               int64_t principal_category_id,
+                                               const char *before_date,
+                                               int64_t *out_paid_cents);
 
 static account_type_t account_type_from_str(const char *s) {
     if (s) {
@@ -24,6 +30,37 @@ static account_type_t account_type_from_str(const char *s) {
         }
     }
     return ACCOUNT_CASH;
+}
+
+static int db_get_account_type_by_id(sqlite3 *db, int64_t account_id,
+                                     account_type_t *out_type) {
+    if (!db || account_id <= 0 || !out_type)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT type FROM accounts WHERE id = ?", -1,
+                                &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_account_type_by_id prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const char *type = (const char *)sqlite3_column_text(stmt, 0);
+        *out_type = account_type_from_str(type);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE)
+        return -2;
+
+    fprintf(stderr, "db_get_account_type_by_id step: %s\n", sqlite3_errmsg(db));
+    return -1;
 }
 
 static transaction_type_t transaction_type_from_str(const char *s) {
@@ -987,6 +1024,25 @@ int db_get_account_balance_cents(sqlite3 *db, int64_t account_id,
         return -1;
     *out_cents = 0;
 
+    account_type_t account_type = ACCOUNT_CASH;
+    int type_rc = db_get_account_type_by_id(db, account_id, &account_type);
+    if (type_rc != 0)
+        return -1;
+
+    if (account_type == ACCOUNT_LOAN) {
+        int64_t remaining_cents = 0;
+        int rc =
+            db_get_loan_remaining_principal_cents(db, account_id, &remaining_cents);
+        if (rc == -2) {
+            *out_cents = 0;
+            return 0;
+        }
+        if (rc != 0)
+            return -1;
+        *out_cents = -remaining_cents;
+        return 0;
+    }
+
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(
         db,
@@ -1181,6 +1237,104 @@ int db_get_account_balance_series(sqlite3 *db, int64_t account_id,
             free(list);
             return -1;
         }
+    }
+
+    account_type_t account_type = ACCOUNT_CASH;
+    int type_rc = db_get_account_type_by_id(db, account_id, &account_type);
+    if (type_rc != 0) {
+        free(list);
+        return -1;
+    }
+
+    if (account_type == ACCOUNT_LOAN) {
+        loan_profile_t profile = {0};
+        int profile_rc = db_get_loan_profile_by_account(db, account_id, &profile);
+        int64_t remaining_now = 0;
+        if (db_get_loan_remaining_principal_cents(db, account_id, &remaining_now) !=
+            0) {
+            remaining_now = 0;
+        }
+
+        if (profile_rc != 0 || profile.split_principal_category_id <= 0) {
+            for (int i = 0; i < lookback_days; i++) {
+                list[i].balance_cents = -remaining_now;
+            }
+            *out = list;
+            return lookback_days;
+        }
+
+        int64_t principal_paid_before_start = 0;
+        if (loan_get_principal_paid_before_date(
+                db, account_id, profile.split_principal_category_id, list[0].date,
+                &principal_paid_before_start) != 0) {
+            free(list);
+            return -1;
+        }
+
+        int64_t opening_remaining =
+            profile.initial_principal_cents - principal_paid_before_start;
+        if (opening_remaining < 0)
+            opening_remaining = 0;
+        if (opening_remaining > profile.initial_principal_cents)
+            opening_remaining = profile.initial_principal_cents;
+
+        sqlite3_stmt *loan_stmt = NULL;
+        int rc = sqlite3_prepare_v2(
+            db,
+            "SELECT COALESCE(t.reflection_date, t.date),"
+            "       COALESCE(SUM(ts.amount_cents), 0)"
+            " FROM transaction_splits ts"
+            " JOIN transactions t ON t.id = ts.transaction_id"
+            " WHERE t.account_id = ?"
+            "   AND t.type = 'EXPENSE'"
+            "   AND ts.category_id = ?"
+            "   AND COALESCE(t.reflection_date, t.date) >= ?"
+            "   AND COALESCE(t.reflection_date, t.date) <= ?"
+            " GROUP BY COALESCE(t.reflection_date, t.date)"
+            " ORDER BY COALESCE(t.reflection_date, t.date)",
+            -1, &loan_stmt, NULL);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "db_get_account_balance_series loan prepare: %s\n",
+                    sqlite3_errmsg(db));
+            free(list);
+            return -1;
+        }
+
+        sqlite3_bind_int64(loan_stmt, 1, account_id);
+        sqlite3_bind_int64(loan_stmt, 2, profile.split_principal_category_id);
+        sqlite3_bind_text(loan_stmt, 3, list[0].date, -1, SQLITE_STATIC);
+        sqlite3_bind_text(loan_stmt, 4, list[lookback_days - 1].date, -1,
+                          SQLITE_STATIC);
+
+        int idx = 0;
+        while ((rc = sqlite3_step(loan_stmt)) == SQLITE_ROW) {
+            const char *date = (const char *)sqlite3_column_text(loan_stmt, 0);
+            if (!date)
+                continue;
+            int64_t principal_paid_cents = sqlite3_column_int64(loan_stmt, 1);
+            while (idx < lookback_days && strcmp(list[idx].date, date) < 0)
+                idx++;
+            if (idx < lookback_days && strcmp(list[idx].date, date) == 0)
+                list[idx].balance_cents += principal_paid_cents;
+        }
+        sqlite3_finalize(loan_stmt);
+        if (rc != SQLITE_DONE) {
+            fprintf(stderr, "db_get_account_balance_series loan step: %s\n",
+                    sqlite3_errmsg(db));
+            free(list);
+            return -1;
+        }
+
+        int64_t running_remaining = opening_remaining;
+        for (int i = 0; i < lookback_days; i++) {
+            running_remaining -= list[i].balance_cents;
+            if (running_remaining < 0)
+                running_remaining = 0;
+            list[i].balance_cents = -running_remaining;
+        }
+
+        *out = list;
+        return lookback_days;
     }
 
     rc = sqlite3_prepare_v2(
@@ -4441,6 +4595,51 @@ static int loan_get_principal_paid_to_date(sqlite3 *db, int64_t account_id,
 
     sqlite3_finalize(stmt);
     fprintf(stderr, "loan_get_principal_paid_to_date step: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+}
+
+static int loan_get_principal_paid_before_date(sqlite3 *db, int64_t account_id,
+                                               int64_t principal_category_id,
+                                               const char *before_date,
+                                               int64_t *out_paid_cents) {
+    if (!out_paid_cents || account_id <= 0 || !before_date ||
+        before_date[0] == '\0')
+        return -1;
+    *out_paid_cents = 0;
+
+    if (principal_category_id <= 0)
+        return 0;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT COALESCE(SUM(ts.amount_cents), 0)"
+        " FROM transaction_splits ts"
+        " JOIN transactions t ON t.id = ts.transaction_id"
+        " WHERE t.account_id = ?"
+        "   AND t.type = 'EXPENSE'"
+        "   AND ts.category_id = ?"
+        "   AND COALESCE(t.reflection_date, t.date) < ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "loan_get_principal_paid_before_date prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    sqlite3_bind_int64(stmt, 2, principal_category_id);
+    sqlite3_bind_text(stmt, 3, before_date, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *out_paid_cents = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_finalize(stmt);
+    fprintf(stderr, "loan_get_principal_paid_before_date step: %s\n",
             sqlite3_errmsg(db));
     return -1;
 }

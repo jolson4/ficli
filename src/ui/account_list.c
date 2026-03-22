@@ -14,7 +14,8 @@
 // Display labels for account types (indexes match account_type_t enum)
 static const char *account_type_labels[] = {"Cash",           "Checking",
                                             "Savings",        "Credit Card",
-                                            "Physical Asset", "Investment"};
+                                            "Physical Asset", "Investment",
+                                            "Loan"};
 
 #define CURSOR_NAME -1
 #define CURSOR_TYPE -2

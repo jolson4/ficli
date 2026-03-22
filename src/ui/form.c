@@ -1556,7 +1556,8 @@ typedef struct {
 
 static const char *account_type_labels[] = {"Cash",           "Checking",
                                             "Savings",        "Credit Card",
-                                            "Physical Asset", "Investment"};
+                                            "Physical Asset", "Investment",
+                                            "Loan"};
 
 static account_type_t next_account_type(account_type_t type) {
     return (account_type_t)((type + 1) % ACCOUNT_TYPE_COUNT);

@@ -88,7 +88,7 @@ make clean    # clean build artifacts
 - [x] Transaction input form ([plan](../.claude/plans/b3d42bcf-a861-4f8f-aec5-fe893c511847.md))
 - [x] Transaction list view per account ([plan](../.claude/plans/buzzing-growing-fog.md))
 - [x] Add UI to add new accounts ([plan](../.claude/plans/stateless-wibbling-plum.md))
-- [x] Add a "Type" property to accounts (Cash, Checking, Savings, Credit Card, Physical Asset, Investment) ([plan](../.claude/plans/sequential-percolating-starlight.md))
+- [x] Add a "Type" property to accounts (Cash, Checking, Savings, Credit Card, Physical Asset, Investment, Loan) ([plan](../.claude/plans/sequential-percolating-starlight.md))
 - [x] Allow editing/deleting transactions
 - [x] Support sort and filter in transaction list ([plan](../.claude/plans/fluttering-shimmying-river.md))
 - [x] Allow hjkl navigation, matching arrow keys

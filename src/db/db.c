@@ -106,9 +106,64 @@ static bool table_has_column(sqlite3 *db, const char *table_name,
     return found;
 }
 
+static bool accounts_type_allows_loan(sqlite3 *db) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='accounts'",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK)
+        return false;
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    const char *sql = (const char *)sqlite3_column_text(stmt, 0);
+    bool has_loan = (sql && strstr(sql, "'LOAN'") != NULL);
+    sqlite3_finalize(stmt);
+    return has_loan;
+}
+
+static int migrate_accounts_add_loan_type(sqlite3 *db) {
+    if (exec_sql(db, "PRAGMA foreign_keys = OFF;") != 0)
+        return -1;
+
+    int rc = exec_sql(
+        db,
+        "BEGIN IMMEDIATE;"
+        "CREATE TABLE accounts_new ("
+        "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "    name TEXT NOT NULL UNIQUE,"
+        "    type TEXT NOT NULL DEFAULT 'CASH'"
+        "        CHECK(type IN ('CASH','CHECKING','SAVINGS','CREDIT_CARD','PHYSICAL_ASSET','INVESTMENT','LOAN')),"
+        "    card_last4 TEXT"
+        ");"
+        "INSERT INTO accounts_new (id, name, type, card_last4)"
+        " SELECT id, name, type, card_last4 FROM accounts;"
+        "DROP TABLE accounts;"
+        "ALTER TABLE accounts_new RENAME TO accounts;"
+        "COMMIT;");
+
+    if (rc != 0)
+        exec_sql(db, "ROLLBACK;");
+
+    if (exec_sql(db, "PRAGMA foreign_keys = ON;") != 0)
+        return -1;
+
+    return rc;
+}
+
 static int migrate_schema(sqlite3 *db) {
     if (!table_has_column(db, "transactions", "reflection_date")) {
         if (exec_sql(db, "ALTER TABLE transactions ADD COLUMN reflection_date TEXT;") != 0)
+            return -1;
+    }
+
+    if (!accounts_type_allows_loan(db)) {
+        if (migrate_accounts_add_loan_type(db) != 0)
             return -1;
     }
 
@@ -227,7 +282,7 @@ static int create_schema(sqlite3 *db) {
         "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "    name TEXT NOT NULL UNIQUE,"
         "    type TEXT NOT NULL DEFAULT 'CASH'"
-        "        CHECK(type IN ('CASH','CHECKING','SAVINGS','CREDIT_CARD','PHYSICAL_ASSET','INVESTMENT')),"
+        "        CHECK(type IN ('CASH','CHECKING','SAVINGS','CREDIT_CARD','PHYSICAL_ASSET','INVESTMENT','LOAN')),"
         "    card_last4 TEXT"
         ");"
 

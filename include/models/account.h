@@ -10,6 +10,7 @@ typedef enum {
     ACCOUNT_CREDIT_CARD,
     ACCOUNT_PHYSICAL_ASSET,
     ACCOUNT_INVESTMENT,
+    ACCOUNT_LOAN,
     ACCOUNT_TYPE_COUNT
 } account_type_t;
 

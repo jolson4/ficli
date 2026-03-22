@@ -291,14 +291,25 @@ static bool show_profile_form(loan_list_state_t *ls, WINDOW *parent,
 
     bool is_edit = (existing != NULL);
     int available_count = 0;
+    int loan_account_count = 0;
     for (int i = 0; i < account_count; i++) {
-        if (!has_profile_for_account(ls, accounts[i].id, is_edit ? existing->account_id : 0))
+        if (accounts[i].type == ACCOUNT_LOAN)
+            loan_account_count++;
+        if (accounts[i].type == ACCOUNT_LOAN &&
+            !has_profile_for_account(ls, accounts[i].id,
+                                     is_edit ? existing->account_id : 0))
             available_count++;
+    }
+    if (!is_edit && loan_account_count == 0) {
+        free(accounts);
+        ui_show_error_popup(parent, " Loans ",
+                            "No Loan accounts found. Create one first.");
+        return false;
     }
     if (!is_edit && available_count == 0) {
         free(accounts);
         ui_show_error_popup(parent, " Loans ",
-                            "All accounts already have loan profiles");
+                            "All Loan accounts already have loan profiles");
         return false;
     }
 
@@ -334,7 +345,8 @@ static bool show_profile_form(loan_list_state_t *ls, WINDOW *parent,
         }
     } else {
         while (account_idx < account_count &&
-               has_profile_for_account(ls, accounts[account_idx].id, 0)) {
+               (accounts[account_idx].type != ACCOUNT_LOAN ||
+                has_profile_for_account(ls, accounts[account_idx].id, 0))) {
             account_idx++;
         }
         if (account_idx >= account_count)
@@ -543,8 +555,11 @@ static bool show_profile_form(loan_list_state_t *ls, WINDOW *parent,
                     idx = account_count - 1;
                 if (idx >= account_count)
                     idx = 0;
-            } while (has_profile_for_account(ls, accounts[idx].id, 0) && idx != account_idx);
-            if (!has_profile_for_account(ls, accounts[idx].id, 0))
+            } while ((accounts[idx].type != ACCOUNT_LOAN ||
+                      has_profile_for_account(ls, accounts[idx].id, 0)) &&
+                     idx != account_idx);
+            if (accounts[idx].type == ACCOUNT_LOAN &&
+                !has_profile_for_account(ls, accounts[idx].id, 0))
                 account_idx = idx;
             continue;
         }
@@ -601,6 +616,12 @@ static bool show_profile_form(loan_list_state_t *ls, WINDOW *parent,
             int64_t principal_cat = 0;
             int64_t interest_cat = 0;
             int64_t escrow_cat = 0;
+            if (!is_edit && accounts[account_idx].type != ACCOUNT_LOAN) {
+                snprintf(error, sizeof(error),
+                         "Loan profile requires an account with type Loan");
+                field = LOAN_FIELD_ACCOUNT;
+                continue;
+            }
             if (db_ensure_loan_split_categories(ls->db, kind, &principal_cat,
                                                 &interest_cat, &escrow_cat) != 0) {
                 snprintf(error, sizeof(error), "Failed to create split categories");

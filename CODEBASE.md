@@ -30,7 +30,7 @@ Quick-reference for the current state of every file, its role, and key implement
 
 | File | Struct | Key Fields |
 |------|--------|------------|
-| `account.h` | `account_t`, `account_type_t` | `id`, `name[64]`, `type` (CASH/CHECKING/SAVINGS/CREDIT_CARD/PHYSICAL_ASSET/INVESTMENT), `card_last4[5]` (non-empty only for CREDIT_CARD) |
+| `account.h` | `account_t`, `account_type_t` | `id`, `name[64]`, `type` (CASH/CHECKING/SAVINGS/CREDIT_CARD/PHYSICAL_ASSET/INVESTMENT/LOAN), `card_last4[5]` (non-empty only for CREDIT_CARD) |
 | `category.h` | `category_t`, `category_type_t` | `id`, `name[64]`, `type` (EXPENSE/INCOME), `parent_id` |
 | `transaction.h` | `transaction_t`, `transaction_type_t` | `id`, `amount_cents`, `type` (EXPENSE/INCOME/TRANSFER), `account_id`, `category_id`, `date[11]` (posted), `reflection_date[11]` (optional override), `payee[128]`, `description[256]`, `transfer_id` |
 | `budget.h` | `budget_t` | `id`, `category_id`, `month[8]` ("YYYY-MM"), `limit_cents` |
