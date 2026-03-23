@@ -7,6 +7,7 @@
 #include "ui/resize.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +21,9 @@ static const char *account_type_labels[] = {"Cash",           "Checking",
 #define CURSOR_NAME -1
 #define CURSOR_TYPE -2
 #define CURSOR_CARD -3
-#define CURSOR_SUBMIT -4
-#define CURSOR_ADD_BUTTON -5
+#define CURSOR_ASSET_VALUE -4
+#define CURSOR_SUBMIT -5
+#define CURSOR_ADD_BUTTON -6
 
 struct account_list_state {
     sqlite3 *db;
@@ -36,10 +38,62 @@ struct account_list_state {
     int type_sel;           // index into account_type_labels
     char card_last4_buf[5]; // up to 4 digits
     int card_last4_pos;
+    char asset_value_buf[24];
+    int asset_value_pos;
     char message[64];
     bool dirty;
     bool changed;
 };
+
+static bool parse_cents_input(const char *buf, int64_t *out_cents) {
+    if (!buf || !out_cents)
+        return false;
+    while (isspace((unsigned char)*buf))
+        buf++;
+    if (*buf == '\0')
+        return false;
+
+    int64_t whole = 0;
+    int64_t frac = 0;
+    int frac_digits = 0;
+    bool seen_dot = false;
+    bool seen_digit = false;
+    for (const char *p = buf; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (isspace(c))
+            continue;
+        if (c == '.') {
+            if (seen_dot)
+                return false;
+            seen_dot = true;
+            continue;
+        }
+        if (!isdigit(c))
+            return false;
+
+        seen_digit = true;
+        int d = c - '0';
+        if (!seen_dot) {
+            if (whole > (INT64_MAX - d) / 10)
+                return false;
+            whole = whole * 10 + d;
+        } else {
+            if (frac_digits >= 2)
+                return false;
+            frac = frac * 10 + d;
+            frac_digits++;
+        }
+    }
+
+    if (!seen_digit)
+        return false;
+    if (frac_digits == 1)
+        frac *= 10;
+    if (whole > (INT64_MAX - frac) / 100)
+        return false;
+    *out_cents = whole * 100 + frac;
+    return true;
+}
 
 static void format_signed_cents(int64_t cents, bool show_plus, char *buf, int n) {
     int64_t abs_cents = cents < 0 ? -cents : cents;
@@ -248,6 +302,7 @@ void account_list_draw(account_list_state_t *ls, WINDOW *win, bool focused) {
 
     if (ls->show_add_form) {
         bool show_card_field = (ls->type_sel == ACCOUNT_CREDIT_CARD);
+        bool show_asset_field = (ls->type_sel == ACCOUNT_PHYSICAL_ASSET);
         int form_top = 2;
         int form_left_col = (w >= 56) ? 4 : 2;
         int form_right_col = w - 3;
@@ -275,7 +330,13 @@ void account_list_draw(account_list_state_t *ls, WINDOW *win, bool focused) {
         int name_row = form_top + 1;
         int type_row = name_row + 1;
         int card_row = type_row + 1;
-        int submit_row = show_card_field ? card_row + 2 : type_row + 2;
+        int asset_row = card_row + 1;
+        int last_field_row = type_row;
+        if (show_card_field)
+            last_field_row = card_row;
+        if (show_asset_field)
+            last_field_row = asset_row;
+        int submit_row = last_field_row + 2;
         int form_bottom = submit_row;
 
         draw_box(win, form_top, form_left_col, form_bottom, form_right_col);
@@ -336,6 +397,25 @@ void account_list_draw(account_list_state_t *ls, WINDOW *win, bool focused) {
             if (card_active) {
                 curs_set(1);
                 wmove(win, card_row, form_field_col + ls->card_last4_pos);
+            }
+        }
+
+        bool asset_active = (ls->cursor == CURSOR_ASSET_VALUE && focused);
+        if (show_asset_field) {
+            if (asset_active)
+                wattron(win, COLOR_PAIR(COLOR_INFO) | A_BOLD);
+            mvwprintw(win, asset_row, form_label_col, "Asset value:");
+            if (asset_active)
+                wattroff(win, COLOR_PAIR(COLOR_INFO) | A_BOLD);
+            int asset_field_color = COLOR_PAIR(asset_active ? COLOR_FORM_ACTIVE
+                                                            : COLOR_FORM_DROPDOWN);
+            wattron(win, asset_field_color);
+            mvwprintw(win, asset_row, form_field_col, "%-*s", form_field_w, "");
+            mvwprintw(win, asset_row, form_field_col, "%-12s", ls->asset_value_buf);
+            wattroff(win, asset_field_color);
+            if (asset_active) {
+                curs_set(1);
+                wmove(win, asset_row, form_field_col + ls->asset_value_pos);
             }
         }
 
@@ -514,8 +594,16 @@ static bool submit_account(account_list_state_t *ls, WINDOW *parent) {
     }
     const char *card =
         (ls->type_sel == ACCOUNT_CREDIT_CARD) ? ls->card_last4_buf : NULL;
+    int64_t asset_value_cents = 0;
+    if (ls->type_sel == ACCOUNT_PHYSICAL_ASSET) {
+        if (!parse_cents_input(ls->asset_value_buf, &asset_value_cents)) {
+            snprintf(ls->message, sizeof(ls->message), "Invalid asset value");
+            return false;
+        }
+    }
     int64_t id = db_insert_account(ls->db, ls->name_buf,
-                                   (account_type_t)ls->type_sel, card);
+                                   (account_type_t)ls->type_sel, card,
+                                   asset_value_cents);
     if (id == -2) {
         ui_show_error_popup(parent, " Account Error ",
                             "An account with that name already exists.");
@@ -532,6 +620,8 @@ static bool submit_account(account_list_state_t *ls, WINDOW *parent) {
         ls->type_sel = 0;
         ls->card_last4_buf[0] = '\0';
         ls->card_last4_pos = 0;
+        ls->asset_value_buf[0] = '\0';
+        ls->asset_value_pos = 0;
         ls->dirty = true;
         ls->changed = true;
         return true;
@@ -610,6 +700,8 @@ bool account_list_handle_input(account_list_state_t *ls, WINDOW *parent, int ch)
         case '\n':
             if (ls->type_sel == ACCOUNT_CREDIT_CARD) {
                 ls->cursor = CURSOR_CARD; // go to card last 4
+            } else if (ls->type_sel == ACCOUNT_PHYSICAL_ASSET) {
+                ls->cursor = CURSOR_ASSET_VALUE;
             } else {
                 // Go to submit button
                 ls->cursor = CURSOR_SUBMIT;
@@ -619,10 +711,20 @@ bool account_list_handle_input(account_list_state_t *ls, WINDOW *parent, int ch)
         case 'h':
             ls->type_sel =
                 (ls->type_sel + ACCOUNT_TYPE_COUNT - 1) % ACCOUNT_TYPE_COUNT;
+            if (ls->type_sel == ACCOUNT_PHYSICAL_ASSET &&
+                ls->asset_value_buf[0] == '\0') {
+                snprintf(ls->asset_value_buf, sizeof(ls->asset_value_buf), "0.00");
+                ls->asset_value_pos = (int)strlen(ls->asset_value_buf);
+            }
             return true;
         case KEY_RIGHT:
         case 'l':
             ls->type_sel = (ls->type_sel + 1) % ACCOUNT_TYPE_COUNT;
+            if (ls->type_sel == ACCOUNT_PHYSICAL_ASSET &&
+                ls->asset_value_buf[0] == '\0') {
+                snprintf(ls->asset_value_buf, sizeof(ls->asset_value_buf), "0.00");
+                ls->asset_value_pos = (int)strlen(ls->asset_value_buf);
+            }
             return true;
         default:
             return false;
@@ -673,6 +775,28 @@ bool account_list_handle_input(account_list_state_t *ls, WINDOW *parent, int ch)
         }
     }
 
+    if (ls->show_add_form && ls->cursor == CURSOR_ASSET_VALUE) {
+        switch (ch) {
+        case 27:
+            ls->show_add_form = false;
+            ls->cursor = CURSOR_ADD_BUTTON;
+            return true;
+        case KEY_UP:
+        case 'k':
+            ls->cursor = CURSOR_TYPE;
+            return true;
+        case KEY_DOWN:
+        case 'j':
+        case '\n':
+            ls->cursor = CURSOR_SUBMIT;
+            return true;
+        default:
+            handle_text_input(ls->asset_value_buf, &ls->asset_value_pos,
+                              (int)sizeof(ls->asset_value_buf), ch);
+            return true;
+        }
+    }
+
     // Submit button is focused
     if (ls->show_add_form && ls->cursor == CURSOR_SUBMIT) {
         switch (ch) {
@@ -682,8 +806,12 @@ bool account_list_handle_input(account_list_state_t *ls, WINDOW *parent, int ch)
             return true;
         case KEY_UP:
         case 'k':
-            ls->cursor =
-                (ls->type_sel == ACCOUNT_CREDIT_CARD) ? CURSOR_CARD : CURSOR_TYPE;
+            if (ls->type_sel == ACCOUNT_CREDIT_CARD)
+                ls->cursor = CURSOR_CARD;
+            else if (ls->type_sel == ACCOUNT_PHYSICAL_ASSET)
+                ls->cursor = CURSOR_ASSET_VALUE;
+            else
+                ls->cursor = CURSOR_TYPE;
             return true;
         case KEY_DOWN:
         case 'j':
@@ -783,6 +911,8 @@ const char *account_list_status_hint(const account_list_state_t *ls) {
     if (ls->cursor == CURSOR_TYPE)
         return "q:Quit  \u2190\u2192:Change Type  \u2191:Name  \u2193:Next  Esc:Close Form";
     if (ls->cursor == CURSOR_CARD)
+        return "q:Quit  Enter:Next  \u2191:Type  Esc:Close Form  \u2190:Sidebar";
+    if (ls->cursor == CURSOR_ASSET_VALUE)
         return "q:Quit  Enter:Next  \u2191:Type  Esc:Close Form  \u2190:Sidebar";
     if (ls->cursor == CURSOR_SUBMIT)
         return "q:Quit  Enter:Submit  \u2191:Back  \u2193:List  Esc:Close Form";

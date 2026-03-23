@@ -63,6 +63,39 @@ static int db_get_account_type_by_id(sqlite3 *db, int64_t account_id,
     return -1;
 }
 
+static int db_get_account_asset_value_by_id(sqlite3 *db, int64_t account_id,
+                                            int64_t *out_cents) {
+    if (!db || account_id <= 0 || !out_cents)
+        return -1;
+    *out_cents = 0;
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db, "SELECT asset_value_cents FROM accounts WHERE id = ?", -1, &stmt,
+        NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_get_account_asset_value_by_id prepare: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *out_cents = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE)
+        return -2;
+
+    fprintf(stderr, "db_get_account_asset_value_by_id step: %s\n",
+            sqlite3_errmsg(db));
+    return -1;
+}
+
 static transaction_type_t transaction_type_from_str(const char *s) {
     if (s) {
         for (int i = 0; i < 3; i++) {
@@ -376,7 +409,7 @@ int db_get_accounts(sqlite3 *db, account_t **out) {
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT id, name, type, card_last4 FROM accounts ORDER BY name", -1, &stmt, NULL);
+        "SELECT id, name, type, card_last4, asset_value_cents FROM accounts ORDER BY name", -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_get_accounts prepare: %s\n", sqlite3_errmsg(db));
         return -1;
@@ -408,6 +441,7 @@ int db_get_accounts(sqlite3 *db, account_t **out) {
         list[count].type = account_type_from_str(atype);
         const char *cl4 = (const char *)sqlite3_column_text(stmt, 3);
         snprintf(list[count].card_last4, sizeof(list[count].card_last4), "%s", cl4 ? cl4 : "");
+        list[count].asset_value_cents = sqlite3_column_int64(stmt, 4);
         count++;
     }
 
@@ -416,10 +450,14 @@ int db_get_accounts(sqlite3 *db, account_t **out) {
     return count;
 }
 
-int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type, const char *card_last4) {
+int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type,
+                         const char *card_last4, int64_t asset_value_cents) {
+    if (asset_value_cents < 0)
+        asset_value_cents = 0;
+
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO accounts (name, type, card_last4) VALUES (?, ?, ?)",
+        "INSERT INTO accounts (name, type, card_last4, asset_value_cents) VALUES (?, ?, ?, ?)",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_insert_account prepare: %s\n", sqlite3_errmsg(db));
@@ -432,6 +470,10 @@ int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type, co
         sqlite3_bind_text(stmt, 3, card_last4, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(stmt, 3);
+    if (type == ACCOUNT_PHYSICAL_ASSET)
+        sqlite3_bind_int64(stmt, 4, asset_value_cents);
+    else
+        sqlite3_bind_int64(stmt, 4, 0);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -451,7 +493,9 @@ int db_update_account(sqlite3 *db, const account_t *account) {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(
         db,
-        "UPDATE accounts SET name = ?, type = ?, card_last4 = ? WHERE id = ?",
+        "UPDATE accounts"
+        " SET name = ?, type = ?, card_last4 = ?, asset_value_cents = ?"
+        " WHERE id = ?",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_update_account prepare: %s\n", sqlite3_errmsg(db));
@@ -465,7 +509,14 @@ int db_update_account(sqlite3 *db, const account_t *account) {
         sqlite3_bind_text(stmt, 3, account->card_last4, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(stmt, 3);
-    sqlite3_bind_int64(stmt, 4, account->id);
+    if (account->type == ACCOUNT_PHYSICAL_ASSET)
+        sqlite3_bind_int64(stmt, 4,
+                           account->asset_value_cents < 0
+                               ? 0
+                               : account->asset_value_cents);
+    else
+        sqlite3_bind_int64(stmt, 4, 0);
+    sqlite3_bind_int64(stmt, 5, account->id);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -1040,6 +1091,16 @@ int db_get_account_balance_cents(sqlite3 *db, int64_t account_id,
         if (rc != 0)
             return -1;
         *out_cents = -remaining_cents;
+        return 0;
+    }
+
+    if (account_type == ACCOUNT_PHYSICAL_ASSET) {
+        int64_t asset_value_cents = 0;
+        int rc = db_get_account_asset_value_by_id(db, account_id,
+                                                  &asset_value_cents);
+        if (rc != 0)
+            return (rc == -2) ? 0 : -1;
+        *out_cents = asset_value_cents;
         return 0;
     }
 

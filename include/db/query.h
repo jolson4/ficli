@@ -12,10 +12,13 @@
 int db_get_accounts(sqlite3 *db, account_t **out);
 
 // Insert an account. card_last4 may be NULL or "" for non-credit-card accounts.
+// asset_value_cents is used only for PHYSICAL_ASSET accounts.
 // Returns new row id, -2 on uniqueness conflict, -1 on error.
-int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type, const char *card_last4);
+int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type,
+                         const char *card_last4, int64_t asset_value_cents);
 
-// Update an account by id. card_last4 may be NULL or "" for non-credit-card accounts.
+// Update an account by id. card_last4 may be NULL or "" for non-credit-card
+// accounts. asset_value_cents is used only for PHYSICAL_ASSET accounts.
 // Returns 0 on success, -2 on uniqueness conflict, -1 on error.
 int db_update_account(sqlite3 *db, const account_t *account);
 

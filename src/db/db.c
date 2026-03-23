@@ -167,6 +167,33 @@ static int migrate_schema(sqlite3 *db) {
             return -1;
     }
 
+    if (!table_has_column(db, "accounts", "asset_value_cents")) {
+        if (exec_sql(db,
+                     "ALTER TABLE accounts"
+                     " ADD COLUMN asset_value_cents INTEGER NOT NULL DEFAULT 0;") !=
+            0)
+            return -1;
+
+        if (exec_sql(
+                db,
+                "UPDATE accounts"
+                " SET asset_value_cents = ("
+                "   SELECT COALESCE(SUM(CASE"
+                "     WHEN t.transfer_id IS NOT NULL THEN CASE"
+                "       WHEN t.id = t.transfer_id THEN -t.amount_cents"
+                "       ELSE t.amount_cents"
+                "     END"
+                "     WHEN t.type = 'INCOME' THEN t.amount_cents"
+                "     WHEN t.type = 'EXPENSE' THEN -t.amount_cents"
+                "     ELSE 0"
+                "   END), 0)"
+                "   FROM transactions t"
+                "   WHERE t.account_id = accounts.id"
+                " )"
+                " WHERE type = 'PHYSICAL_ASSET';") != 0)
+            return -1;
+    }
+
     if (!table_has_column(db, "loan_profiles", "split_principal_cents")) {
         if (exec_sql(db,
                      "ALTER TABLE loan_profiles"
@@ -283,7 +310,8 @@ static int create_schema(sqlite3 *db) {
         "    name TEXT NOT NULL UNIQUE,"
         "    type TEXT NOT NULL DEFAULT 'CASH'"
         "        CHECK(type IN ('CASH','CHECKING','SAVINGS','CREDIT_CARD','PHYSICAL_ASSET','INVESTMENT','LOAN')),"
-        "    card_last4 TEXT"
+        "    card_last4 TEXT,"
+        "    asset_value_cents INTEGER NOT NULL DEFAULT 0"
         ");"
 
         "CREATE TABLE IF NOT EXISTS categories ("

@@ -1529,12 +1529,13 @@ static void handle_date_input(char *buf, int *pos, int ch) {
 }
 
 #define ACCOUNT_FORM_WIDTH 56
-#define ACCOUNT_FORM_HEIGHT 13
+#define ACCOUNT_FORM_HEIGHT 15
 
 enum {
     ACCOUNT_FIELD_NAME,
     ACCOUNT_FIELD_TYPE,
     ACCOUNT_FIELD_CARD,
+    ACCOUNT_FIELD_ASSET_VALUE,
     ACCOUNT_FIELD_SUBMIT,
     ACCOUNT_FIELD_COUNT
 };
@@ -1551,6 +1552,8 @@ typedef struct {
     account_type_t type;
     char card_last4[5];
     int card_last4_pos;
+    char asset_value[24];
+    int asset_value_pos;
     char error[64];
 } account_form_state_t;
 
@@ -1569,26 +1572,51 @@ static account_type_t prev_account_type(account_type_t type) {
 
 static int account_field_row(int field) { return 2 + field * 2; }
 
+static bool account_field_hidden(const account_form_state_t *fs, int field) {
+    if (!fs)
+        return true;
+    if (field == ACCOUNT_FIELD_CARD)
+        return fs->type != ACCOUNT_CREDIT_CARD;
+    if (field == ACCOUNT_FIELD_ASSET_VALUE)
+        return fs->type != ACCOUNT_PHYSICAL_ASSET;
+    return false;
+}
+
 static void account_form_clamp_field(account_form_state_t *fs) {
-    if (fs->type != ACCOUNT_CREDIT_CARD && fs->current_field == ACCOUNT_FIELD_CARD)
-        fs->current_field = ACCOUNT_FIELD_SUBMIT;
+    if (!fs)
+        return;
+    if (!account_field_hidden(fs, fs->current_field))
+        return;
+    for (int i = ACCOUNT_FIELD_COUNT - 1; i >= 0; i--) {
+        if (!account_field_hidden(fs, i)) {
+            fs->current_field = i;
+            return;
+        }
+    }
 }
 
 static void account_form_next_field(account_form_state_t *fs) {
-    if (fs->current_field >= ACCOUNT_FIELD_COUNT - 1)
+    if (!fs)
         return;
-    fs->current_field++;
-    account_form_clamp_field(fs);
+    int next = fs->current_field;
+    do {
+        if (next >= ACCOUNT_FIELD_COUNT - 1)
+            return;
+        next++;
+    } while (account_field_hidden(fs, next));
+    fs->current_field = next;
 }
 
 static void account_form_prev_field(account_form_state_t *fs) {
-    if (fs->current_field <= 0)
+    if (!fs)
         return;
-    fs->current_field--;
-    if (fs->type != ACCOUNT_CREDIT_CARD &&
-        fs->current_field == ACCOUNT_FIELD_CARD) {
-        fs->current_field = ACCOUNT_FIELD_TYPE;
-    }
+    int prev = fs->current_field;
+    do {
+        if (prev <= 0)
+            return;
+        prev--;
+    } while (account_field_hidden(fs, prev));
+    fs->current_field = prev;
 }
 
 static void account_form_init(account_form_state_t *fs, sqlite3 *db,
@@ -1607,6 +1635,9 @@ static void account_form_init(account_form_state_t *fs, sqlite3 *db,
         snprintf(fs->card_last4, sizeof(fs->card_last4), "%s",
                  account->card_last4);
         fs->card_last4_pos = (int)strlen(fs->card_last4);
+        format_amount_string(account->asset_value_cents, fs->asset_value,
+                             sizeof(fs->asset_value));
+        fs->asset_value_pos = (int)strlen(fs->asset_value);
     }
 }
 
@@ -1624,6 +1655,8 @@ static void account_form_draw(account_form_state_t *fs) {
     mvwprintw(w, account_field_row(ACCOUNT_FIELD_NAME), LABEL_COL, "Name:");
     mvwprintw(w, account_field_row(ACCOUNT_FIELD_TYPE), LABEL_COL, "Type:");
     mvwprintw(w, account_field_row(ACCOUNT_FIELD_CARD), LABEL_COL, "Card last 4:");
+    mvwprintw(w, account_field_row(ACCOUNT_FIELD_ASSET_VALUE), LABEL_COL,
+              "Asset value:");
 
     bool name_active = (fs->current_field == ACCOUNT_FIELD_NAME);
     if (name_active)
@@ -1661,6 +1694,25 @@ static void account_form_draw(account_form_state_t *fs) {
     if (card_active)
         wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
 
+    bool asset_active =
+        (fs->current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+         fs->type == ACCOUNT_PHYSICAL_ASSET);
+    if (asset_active)
+        wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+    mvwprintw(w, account_field_row(ACCOUNT_FIELD_ASSET_VALUE), FIELD_COL, "%-*s",
+              FIELD_WIDTH, "");
+    if (fs->type == ACCOUNT_PHYSICAL_ASSET) {
+        mvwprintw(w, account_field_row(ACCOUNT_FIELD_ASSET_VALUE), FIELD_COL,
+                  "%-12s", fs->asset_value);
+    } else {
+        wattron(w, A_DIM);
+        mvwprintw(w, account_field_row(ACCOUNT_FIELD_ASSET_VALUE), FIELD_COL,
+                  "(n/a)");
+        wattroff(w, A_DIM);
+    }
+    if (asset_active)
+        wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+
     const char *btn = "[ Submit ]";
     int btn_len = (int)strlen(btn);
     bool submit_active = (fs->current_field == ACCOUNT_FIELD_SUBMIT);
@@ -1691,8 +1743,12 @@ static void account_form_draw(account_form_state_t *fs) {
                    fs->type == ACCOUNT_CREDIT_CARD) {
             wmove(w, account_field_row(ACCOUNT_FIELD_CARD),
                   FIELD_COL + fs->card_last4_pos);
+        } else if (fs->current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+                   fs->type == ACCOUNT_PHYSICAL_ASSET) {
+            wmove(w, account_field_row(ACCOUNT_FIELD_ASSET_VALUE),
+                  FIELD_COL + fs->asset_value_pos);
         } else {
-            wmove(w, account_field_row(ACCOUNT_FIELD_CARD), FIELD_COL);
+            wmove(w, account_field_row(ACCOUNT_FIELD_TYPE), FIELD_COL);
         }
     }
 
@@ -1733,6 +1789,16 @@ static bool account_form_validate_and_save(account_form_state_t *fs) {
         return false;
     }
 
+    int64_t asset_value_cents = 0;
+    if (fs->type == ACCOUNT_PHYSICAL_ASSET) {
+        asset_value_cents = parse_amount_cents(fs->asset_value);
+        if (asset_value_cents < 0) {
+            snprintf(fs->error, sizeof(fs->error), "Invalid asset value");
+            fs->current_field = ACCOUNT_FIELD_ASSET_VALUE;
+            return false;
+        }
+    }
+
     account_t updated = {0};
     if (fs->is_edit && fs->account)
         updated.id = fs->account->id;
@@ -1742,6 +1808,8 @@ static bool account_form_validate_and_save(account_form_state_t *fs) {
         snprintf(updated.card_last4, sizeof(updated.card_last4), "%s",
                  fs->card_last4);
     }
+    updated.asset_value_cents =
+        (updated.type == ACCOUNT_PHYSICAL_ASSET) ? asset_value_cents : 0;
 
     if (fs->is_edit) {
         int rc = db_update_account(fs->db, &updated);
@@ -1755,7 +1823,8 @@ static bool account_form_validate_and_save(account_form_state_t *fs) {
         }
     } else {
         int64_t id = db_insert_account(fs->db, updated.name, updated.type,
-                                       updated.card_last4);
+                                       updated.card_last4,
+                                       updated.asset_value_cents);
         if (id == -2) {
             snprintf(fs->error, sizeof(fs->error), "Name already exists");
             return false;
@@ -1827,14 +1896,25 @@ form_result_t form_account(WINDOW *parent, sqlite3 *db, account_t *account,
                 if (fs.type != ACCOUNT_CREDIT_CARD) {
                     fs.card_last4[0] = '\0';
                     fs.card_last4_pos = 0;
-                    account_form_clamp_field(&fs);
                 }
+                if (fs.type != ACCOUNT_PHYSICAL_ASSET) {
+                    fs.asset_value[0] = '\0';
+                    fs.asset_value_pos = 0;
+                } else if (fs.asset_value[0] == '\0') {
+                    snprintf(fs.asset_value, sizeof(fs.asset_value), "0.00");
+                    fs.asset_value_pos = (int)strlen(fs.asset_value);
+                }
+                account_form_clamp_field(&fs);
             } else if (fs.current_field == ACCOUNT_FIELD_NAME) {
                 handle_text_input(fs.name, &fs.name_pos, (int)sizeof(fs.name), ch,
                                   false);
             } else if (fs.current_field == ACCOUNT_FIELD_CARD &&
                        fs.type == ACCOUNT_CREDIT_CARD) {
                 account_handle_card_input(&fs, ch);
+            } else if (fs.current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+                       fs.type == ACCOUNT_PHYSICAL_ASSET) {
+                handle_text_input(fs.asset_value, &fs.asset_value_pos,
+                                  (int)sizeof(fs.asset_value), ch, true);
             }
             break;
         case KEY_LEFT:
@@ -1843,14 +1923,25 @@ form_result_t form_account(WINDOW *parent, sqlite3 *db, account_t *account,
                 if (fs.type != ACCOUNT_CREDIT_CARD) {
                     fs.card_last4[0] = '\0';
                     fs.card_last4_pos = 0;
-                    account_form_clamp_field(&fs);
                 }
+                if (fs.type != ACCOUNT_PHYSICAL_ASSET) {
+                    fs.asset_value[0] = '\0';
+                    fs.asset_value_pos = 0;
+                } else if (fs.asset_value[0] == '\0') {
+                    snprintf(fs.asset_value, sizeof(fs.asset_value), "0.00");
+                    fs.asset_value_pos = (int)strlen(fs.asset_value);
+                }
+                account_form_clamp_field(&fs);
             } else if (fs.current_field == ACCOUNT_FIELD_NAME) {
                 handle_text_input(fs.name, &fs.name_pos, (int)sizeof(fs.name), ch,
                                   false);
             } else if (fs.current_field == ACCOUNT_FIELD_CARD &&
                        fs.type == ACCOUNT_CREDIT_CARD) {
                 account_handle_card_input(&fs, ch);
+            } else if (fs.current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+                       fs.type == ACCOUNT_PHYSICAL_ASSET) {
+                handle_text_input(fs.asset_value, &fs.asset_value_pos,
+                                  (int)sizeof(fs.asset_value), ch, true);
             }
             break;
         case KEY_RIGHT:
@@ -1859,14 +1950,25 @@ form_result_t form_account(WINDOW *parent, sqlite3 *db, account_t *account,
                 if (fs.type != ACCOUNT_CREDIT_CARD) {
                     fs.card_last4[0] = '\0';
                     fs.card_last4_pos = 0;
-                    account_form_clamp_field(&fs);
                 }
+                if (fs.type != ACCOUNT_PHYSICAL_ASSET) {
+                    fs.asset_value[0] = '\0';
+                    fs.asset_value_pos = 0;
+                } else if (fs.asset_value[0] == '\0') {
+                    snprintf(fs.asset_value, sizeof(fs.asset_value), "0.00");
+                    fs.asset_value_pos = (int)strlen(fs.asset_value);
+                }
+                account_form_clamp_field(&fs);
             } else if (fs.current_field == ACCOUNT_FIELD_NAME) {
                 handle_text_input(fs.name, &fs.name_pos, (int)sizeof(fs.name), ch,
                                   false);
             } else if (fs.current_field == ACCOUNT_FIELD_CARD &&
                        fs.type == ACCOUNT_CREDIT_CARD) {
                 account_handle_card_input(&fs, ch);
+            } else if (fs.current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+                       fs.type == ACCOUNT_PHYSICAL_ASSET) {
+                handle_text_input(fs.asset_value, &fs.asset_value_pos,
+                                  (int)sizeof(fs.asset_value), ch, true);
             }
             break;
         case KEY_RESIZE:
@@ -1880,6 +1982,10 @@ form_result_t form_account(WINDOW *parent, sqlite3 *db, account_t *account,
             } else if (fs.current_field == ACCOUNT_FIELD_CARD &&
                        fs.type == ACCOUNT_CREDIT_CARD) {
                 account_handle_card_input(&fs, ch);
+            } else if (fs.current_field == ACCOUNT_FIELD_ASSET_VALUE &&
+                       fs.type == ACCOUNT_PHYSICAL_ASSET) {
+                handle_text_input(fs.asset_value, &fs.asset_value_pos,
+                                  (int)sizeof(fs.asset_value), ch, true);
             }
             break;
         }
