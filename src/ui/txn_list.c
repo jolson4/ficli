@@ -19,6 +19,7 @@
 #define BALANCE_CHART_LOOKBACK_DAYS 90
 #define CHART_PLOT_HEIGHT 6
 #define CHART_MIN_WIDTH 56
+#define TXN_TAB_VISIBLE_ACCOUNTS 6
 // Description column takes remaining width, but enforce a minimum for usability
 #define DESC_COL_MIN_WIDTH 4
 
@@ -196,6 +197,125 @@ static int txn_list_display_index_by_id(const txn_list_state_t *ls, int64_t id) 
             return i;
     }
     return -1;
+}
+
+static bool txn_list_pick_account_popup(txn_list_state_t *ls, WINDOW *parent) {
+    if (!ls || !parent || ls->account_count <= 0)
+        return false;
+
+    int ph, pw;
+    getmaxyx(parent, ph, pw);
+    int py, px;
+    getbegyx(parent, py, px);
+
+    int win_h = ls->account_count + 4;
+    if (win_h > ph - 2)
+        win_h = ph - 2;
+    if (win_h < 8)
+        win_h = 8;
+
+    int win_w = 48;
+    if (win_w > pw - 2)
+        win_w = pw - 2;
+    if (win_w < 28)
+        return false;
+
+    WINDOW *w = newwin(win_h, win_w, py + (ph - win_h) / 2, px + (pw - win_w) / 2);
+    if (!w)
+        return false;
+    keypad(w, TRUE);
+    wbkgd(w, COLOR_PAIR(COLOR_FORM));
+
+    int sel = ls->account_sel;
+    if (sel < 0 || sel >= ls->account_count)
+        sel = 0;
+    int scroll = 0;
+    int visible = win_h - 4;
+    if (visible < 1)
+        visible = 1;
+    bool chosen = false;
+    bool done = false;
+
+    while (!done) {
+        if (sel < scroll)
+            scroll = sel;
+        if (sel >= scroll + visible)
+            scroll = sel - visible + 1;
+        if (scroll < 0)
+            scroll = 0;
+        int max_scroll = ls->account_count - visible;
+        if (max_scroll < 0)
+            max_scroll = 0;
+        if (scroll > max_scroll)
+            scroll = max_scroll;
+
+        werase(w);
+        box(w, 0, 0);
+        mvwprintw(w, 0, 2, " Select Account ");
+        mvwprintw(w, 1, 2, "j/k move  Enter select  Esc cancel");
+
+        for (int i = 0; i < visible; i++) {
+            int idx = scroll + i;
+            if (idx >= ls->account_count)
+                break;
+            int row = 2 + i;
+            bool selected = (idx == sel);
+            if (selected)
+                wattron(w, COLOR_PAIR(COLOR_SELECTED));
+            mvwprintw(w, row, 2, "%*s", win_w - 4, "");
+            mvwprintw(w, row, 2, "%d: %-*.*s", idx + 1, win_w - 7, win_w - 7,
+                      ls->accounts[idx].name);
+            if (selected)
+                wattroff(w, COLOR_PAIR(COLOR_SELECTED));
+        }
+
+        wrefresh(w);
+        int ch = wgetch(w);
+        switch (ch) {
+        case 27:
+            done = true;
+            break;
+        case KEY_UP:
+        case 'k':
+            if (sel > 0)
+                sel--;
+            break;
+        case KEY_DOWN:
+        case 'j':
+            if (sel < ls->account_count - 1)
+                sel++;
+            break;
+        case KEY_HOME:
+        case 'g':
+            sel = 0;
+            break;
+        case KEY_END:
+        case 'G':
+            sel = ls->account_count - 1;
+            break;
+        case '\n':
+            chosen = true;
+            done = true;
+            break;
+        default:
+            if (ch >= '1' && ch <= '9') {
+                int idx = ch - '1';
+                if (idx < ls->account_count)
+                    sel = idx;
+            }
+            break;
+        }
+    }
+
+    delwin(w);
+    touchwin(parent);
+
+    if (!chosen || sel == ls->account_sel)
+        return false;
+
+    ls->account_sel = sel;
+    ls->dirty = true;
+    return true;
 }
 
 static bool txn_edit_changes_any(const txn_edit_changes_t *changes) {
@@ -1249,10 +1369,20 @@ void txn_list_draw(txn_list_state_t *ls, WINDOW *win, bool focused) {
     curs_set(ls->filter_active ? 1 : 0);
 
     // -- Account tabs (row 1 inside box) --
+    int tab_start = 0;
+    if (ls->account_sel >= 0) {
+        tab_start =
+            (ls->account_sel / TXN_TAB_VISIBLE_ACCOUNTS) * TXN_TAB_VISIBLE_ACCOUNTS;
+    }
+    int tab_end = tab_start + TXN_TAB_VISIBLE_ACCOUNTS;
+    if (tab_end > ls->account_count)
+        tab_end = ls->account_count;
+
     int col = 2;
-    for (int i = 0; i < ls->account_count && col < w - 2; i++) {
+    for (int i = tab_start; i < tab_end && col < w - 2; i++) {
         char label[80];
-        snprintf(label, sizeof(label), "%d:%s", i + 1, ls->accounts[i].name);
+        snprintf(label, sizeof(label), "%d:%s", i - tab_start + 1,
+                 ls->accounts[i].name);
         int len = (int)strlen(label);
 
         if (i == ls->account_sel) {
@@ -1264,6 +1394,8 @@ void txn_list_draw(txn_list_state_t *ls, WINDOW *win, bool focused) {
         }
         col += len + 2;
     }
+    if (ls->account_count > TXN_TAB_VISIBLE_ACCOUNTS && col < w - 2)
+        mvwprintw(win, 1, col, "%s", "9:More");
 
     // -- Summary line (centered, row 4) --
     char balance_buf[24];
@@ -1868,12 +2000,29 @@ bool txn_list_handle_input(txn_list_state_t *ls, WINDOW *parent, int ch) {
         }
         return true;
     default:
-        // Account switching: '1'-'9'
-        if (ch >= '1' && ch <= '9') {
-            int idx = ch - '1';
+        // Account switching: '1'-'6' for visible tabs, '9' for picker.
+        if (ch >= '1' && ch <= '6') {
+            int tab_start = 0;
+            if (ls->account_sel >= 0) {
+                tab_start = (ls->account_sel / TXN_TAB_VISIBLE_ACCOUNTS) *
+                            TXN_TAB_VISIBLE_ACCOUNTS;
+            }
+            int idx = tab_start + (ch - '1');
             if (idx < ls->account_count && idx != ls->account_sel) {
                 ls->account_sel = idx;
                 ls->dirty = true;
+            }
+            return true;
+        }
+        if (ch == '9') {
+            if (ls->account_count > TXN_TAB_VISIBLE_ACCOUNTS)
+                txn_list_pick_account_popup(ls, parent);
+            else {
+                int idx = 8;
+                if (idx < ls->account_count && idx != ls->account_sel) {
+                    ls->account_sel = idx;
+                    ls->dirty = true;
+                }
             }
             return true;
         }
@@ -1890,7 +2039,7 @@ const char *txn_list_status_hint(const txn_list_state_t *ls) {
         return "Type to filter  Enter:done  Esc:clear";
 
     if (ls->txn_count == 0)
-        return "90d chart  1-9 acct  a add  L auto-link  /filter  s sort  \u2190 back";
+        return "90d chart  1-6 acct  9 more  a add  L auto-link  /filter  s sort  \u2190 back";
 
     const char *filter_tag = ls->filter_len > 0 ? "/filter[on]" : "/filter";
     const char *edit_tag =
@@ -1898,12 +2047,12 @@ const char *txn_list_status_hint(const txn_list_state_t *ls) {
                                                         : "e edit";
     if (ls->selected_count > 0) {
         snprintf(buf, sizeof(buf),
-                 "%d selected  90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-9 acct "
+                 "%d selected  90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-6 acct 9 more "
                  " a add  \u2190 back",
                  ls->selected_count, edit_tag, filter_tag);
     } else {
         snprintf(buf, sizeof(buf),
-                 "90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-9 acct "
+                 "90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-6 acct 9 more "
                  " a add  \u2190 back",
                  edit_tag, filter_tag);
     }

@@ -100,7 +100,7 @@ static const help_row_t help_rows[] = {
     {"g / Home", "Jump to first"},
     {"G / End", "Jump to last"},
     {"Ctrl+D / Ctrl+U", "Half-page down/up"},
-    {"1-9", "Switch account tab"},
+    {"1-6 / 9", "Switch tab / open account picker"},
 
     {"", ""},
     {NULL, "Filter mode (transactions)"},
