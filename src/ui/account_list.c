@@ -671,7 +671,7 @@ bool account_list_handle_input(account_list_state_t *ls, WINDOW *parent, int ch)
             ls->cursor = CURSOR_ADD_BUTTON;
             return true;
         }
-        if (ch == KEY_UP || ch == 'k') {
+        if (ch == KEY_UP) {
             return true;
         }
         if (ch == KEY_DOWN || ch == '\n') {
