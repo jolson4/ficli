@@ -76,6 +76,17 @@ int db_get_next_loan_payment_date(sqlite3 *db, int64_t account_id,
 // inserted transaction id, -2 not found, -1 on error.
 int64_t db_enact_loan_payment(sqlite3 *db, int64_t account_id);
 
+// Enact an extra principal-only payment for a loan account by creating a
+// transfer from `from_account_id` into the loan account, then creating an
+// EXPENSE transaction split entirely to principal on the loan account.
+// `date` must be a valid transaction date (YYYY-MM-DD or accepted UI
+// variants). Returns inserted principal transaction id, -2 not found, -1 on
+// error.
+int64_t db_enact_loan_extra_principal_payment(sqlite3 *db, int64_t account_id,
+                                              int64_t from_account_id,
+                                              int64_t principal_cents,
+                                              const char *date);
+
 // Compute the amortized split breakdown for the next scheduled payment.
 // Outputs principal, interest, and escrow components in cents.
 // Returns 0 success, -2 not found, -1 error.

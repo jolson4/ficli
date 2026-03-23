@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef enum {
     LOAN_FIELD_ACCOUNT = 0,
@@ -184,6 +185,16 @@ static bool validate_iso_date(const char *date) {
     return true;
 }
 
+static bool today_iso_date(char out[11]) {
+    if (!out)
+        return false;
+    time_t now = time(NULL);
+    struct tm tmv;
+    if (!localtime_r(&now, &tmv))
+        return false;
+    return strftime(out, 11, "%Y-%m-%d", &tmv) == 10;
+}
+
 static void handle_text_input(char *buf, int *pos, int maxlen, int ch,
                               bool allow_dot) {
     int len = (int)strlen(buf);
@@ -274,6 +285,236 @@ static bool confirm_simple(WINDOW *parent, const char *title, const char *line1,
     delwin(w);
     touchwin(parent);
     return confirm;
+}
+
+typedef enum {
+    EXTRA_FIELD_FROM_ACCOUNT = 0,
+    EXTRA_FIELD_AMOUNT,
+    EXTRA_FIELD_DATE,
+    EXTRA_FIELD_SUBMIT,
+    EXTRA_FIELD_COUNT,
+} extra_field_t;
+
+static bool show_extra_principal_form(loan_list_state_t *ls, WINDOW *parent,
+                                      const loan_profile_t *profile) {
+    if (!ls || !parent || !profile)
+        return false;
+
+    account_t *accounts = NULL;
+    int account_count = db_get_accounts(ls->db, &accounts);
+    if (account_count <= 0) {
+        free(accounts);
+        ui_show_error_popup(parent, " Loans ", "No funding accounts available");
+        return false;
+    }
+
+    int funding_count = 0;
+    for (int i = 0; i < account_count; i++) {
+        if (accounts[i].id != profile->account_id &&
+            accounts[i].type != ACCOUNT_LOAN)
+            funding_count++;
+    }
+    if (funding_count == 0) {
+        free(accounts);
+        ui_show_error_popup(parent, " Loans ",
+                            "No non-Loan account available for funding");
+        return false;
+    }
+
+    int funding_idx = 0;
+    while (funding_idx < account_count &&
+           (accounts[funding_idx].id == profile->account_id ||
+            accounts[funding_idx].type == ACCOUNT_LOAN))
+        funding_idx++;
+    if (funding_idx >= account_count) {
+        free(accounts);
+        ui_show_error_popup(parent, " Loans ", "No funding account found");
+        return false;
+    }
+
+    int ph, pw;
+    getmaxyx(parent, ph, pw);
+
+    int win_h = 11;
+    int win_w = 70;
+    if (win_h > ph)
+        win_h = ph;
+    if (win_w > pw)
+        win_w = pw;
+    if (win_h < 8 || win_w < 50)
+        return false;
+
+    int py, px;
+    getbegyx(parent, py, px);
+    WINDOW *w = newwin(win_h, win_w, py + (ph - win_h) / 2, px + (pw - win_w) / 2);
+    keypad(w, TRUE);
+    wbkgd(w, COLOR_PAIR(COLOR_FORM));
+
+    char amount[24] = "";
+    int amount_pos = 0;
+    char date[16] = "";
+    if (!today_iso_date(date))
+        snprintf(date, sizeof(date), "%s", profile->start_date);
+    int date_pos = (int)strlen(date);
+
+    extra_field_t field = EXTRA_FIELD_FROM_ACCOUNT;
+    char error[96] = "";
+    bool saved = false;
+    bool done = false;
+    while (!done) {
+        werase(w);
+        box(w, 0, 0);
+        mvwprintw(w, 0, 2, " Extra Principal Payment ");
+        mvwprintw(w, 2, 2, "Loan account: %-.45s", profile->account_name);
+
+        int label_col = 2;
+        int field_col = 24;
+
+        mvwprintw(w, 3, label_col, "From account:");
+        if (field == EXTRA_FIELD_FROM_ACCOUNT)
+            wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+        mvwprintw(w, 3, field_col, "< %-36.36s >", accounts[funding_idx].name);
+        if (field == EXTRA_FIELD_FROM_ACCOUNT)
+            wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+
+        mvwprintw(w, 4, label_col, "Amount:");
+        if (field == EXTRA_FIELD_AMOUNT)
+            wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+        mvwprintw(w, 4, field_col, "%-14s", amount);
+        if (field == EXTRA_FIELD_AMOUNT)
+            wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+
+        mvwprintw(w, 5, label_col, "Date (YYYY-MM-DD):");
+        if (field == EXTRA_FIELD_DATE)
+            wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+        mvwprintw(w, 5, field_col, "%-14s", date);
+        if (field == EXTRA_FIELD_DATE)
+            wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
+
+        if (field == EXTRA_FIELD_SUBMIT)
+            wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
+        mvwprintw(w, 7, (win_w - 31) / 2, "[ Post Extra Principal ]");
+        if (field == EXTRA_FIELD_SUBMIT)
+            wattroff(w, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
+
+        if (error[0] != '\0') {
+            wattron(w, A_BOLD);
+            mvwprintw(w, win_h - 2, 2, "%s", error);
+            wattroff(w, A_BOLD);
+        } else {
+            mvwprintw(w, win_h - 2, 2, "Ctrl+S:Post  Esc:Cancel");
+        }
+
+        if (field == EXTRA_FIELD_SUBMIT || field == EXTRA_FIELD_FROM_ACCOUNT) {
+            curs_set(0);
+        } else {
+            curs_set(1);
+            int cursor_x = field_col;
+            int cursor_y = (field == EXTRA_FIELD_AMOUNT) ? 4 : 5;
+            cursor_x += (field == EXTRA_FIELD_AMOUNT) ? amount_pos : date_pos;
+            wmove(w, cursor_y, cursor_x);
+        }
+
+        wrefresh(w);
+
+        int ch = wgetch(w);
+        if (ui_requeue_resize_event(ch)) {
+            done = true;
+            continue;
+        }
+        error[0] = '\0';
+
+        if (ch == 27) {
+            done = true;
+            continue;
+        }
+
+        if (ch == '\t' || ch == KEY_DOWN) {
+            field = (extra_field_t)((field + 1) % EXTRA_FIELD_COUNT);
+            continue;
+        }
+        if (ch == KEY_BTAB || ch == KEY_UP) {
+            field =
+                (extra_field_t)((field + EXTRA_FIELD_COUNT - 1) % EXTRA_FIELD_COUNT);
+            continue;
+        }
+
+        if (field == EXTRA_FIELD_FROM_ACCOUNT &&
+            (ch == KEY_LEFT || ch == KEY_RIGHT)) {
+            int step = (ch == KEY_RIGHT) ? 1 : -1;
+            int idx = funding_idx;
+            do {
+                idx += step;
+                if (idx < 0)
+                    idx = account_count - 1;
+                if (idx >= account_count)
+                    idx = 0;
+            } while ((accounts[idx].id == profile->account_id ||
+                      accounts[idx].type == ACCOUNT_LOAN) &&
+                     idx != funding_idx);
+            if (accounts[idx].id != profile->account_id &&
+                accounts[idx].type != ACCOUNT_LOAN)
+                funding_idx = idx;
+            continue;
+        }
+
+        if (ch == 19 || (ch == '\n' && field == EXTRA_FIELD_SUBMIT)) {
+            int64_t extra_cents = 0;
+            if (!parse_cents_input(amount, &extra_cents) || extra_cents <= 0) {
+                snprintf(error, sizeof(error), "Amount must be > 0");
+                field = EXTRA_FIELD_AMOUNT;
+                continue;
+            }
+            if (!validate_iso_date(date)) {
+                snprintf(error, sizeof(error), "Date must be YYYY-MM-DD");
+                field = EXTRA_FIELD_DATE;
+                continue;
+            }
+
+            char fmt_amount[24];
+            format_signed_cents(extra_cents, false, fmt_amount, sizeof(fmt_amount));
+            char line1[96];
+            char line2[96];
+            snprintf(line1, sizeof(line1), "Transfer %s from '%-.28s' on %s?",
+                     fmt_amount, accounts[funding_idx].name, date);
+            snprintf(line2, sizeof(line2),
+                     "Then post principal-only payment to '%-.28s'.",
+                     profile->account_name);
+            if (!confirm_simple(parent, " Extra Principal ", line1, line2,
+                                "y:Post payment  n:Cancel")) {
+                continue;
+            }
+
+            int64_t txn_id = db_enact_loan_extra_principal_payment(
+                ls->db, profile->account_id, accounts[funding_idx].id, extra_cents,
+                date);
+            if (txn_id <= 0) {
+                snprintf(error, sizeof(error), "Failed to post extra principal");
+                continue;
+            }
+
+            saved = true;
+            done = true;
+            continue;
+        }
+
+        switch (field) {
+        case EXTRA_FIELD_AMOUNT:
+            handle_text_input(amount, &amount_pos, (int)sizeof(amount), ch, true);
+            break;
+        case EXTRA_FIELD_DATE:
+            handle_text_input(date, &date_pos, (int)sizeof(date), ch, false);
+            break;
+        default:
+            break;
+        }
+    }
+
+    curs_set(0);
+    delwin(w);
+    touchwin(parent);
+    free(accounts);
+    return saved;
 }
 
 static bool show_profile_form(loan_list_state_t *ls, WINDOW *parent,
@@ -895,7 +1136,7 @@ void loan_list_draw(loan_list_state_t *ls, WINDOW *win, bool focused) {
             mvwprintw(win, row, payee_col, "%-*.*s", payee_w, payee_w,
                       "[Next Payment]");
             mvwprintw(win, row, desc_col, "%-*.*s", desc_w, desc_w,
-                      "Press Enter to enact payment");
+                      "Enter: scheduled  x: extra principal");
         } else {
             const txn_row_t *t = &ls->transactions[idx - 1];
             char amt[24];
@@ -983,6 +1224,16 @@ bool loan_list_handle_input(loan_list_state_t *ls, WINDOW *parent, int ch) {
             ls->dirty = true;
             ls->changed = true;
             snprintf(ls->message, sizeof(ls->message), "Loan profile updated");
+        }
+        return true;
+    case 'x':
+    case 'X':
+        if (ls->profile_count <= 0)
+            return true;
+        if (show_extra_principal_form(ls, parent, &ls->profiles[ls->profile_sel])) {
+            ls->dirty = true;
+            ls->changed = true;
+            snprintf(ls->message, sizeof(ls->message), "Extra principal posted");
         }
         return true;
     case 'd':
@@ -1123,12 +1374,12 @@ const char *loan_list_status_hint(const loan_list_state_t *ls) {
     if (!ls)
         return "";
     if (ls->cursor == -1)
-        return "Enter add-profile  j/k move  n add  E edit-loan  D del-loan  <- back";
+        return "Enter add-profile  j/k move  n add  x extra-principal  E edit-loan  D del-loan  <- back";
     if (ls->profile_count <= 0)
         return "Enter add-profile  n add  <- back";
     if (ls->cursor == 0)
-        return "1-9 loan  j/k move  Enter enact-payment  n add  E edit-loan  D del-loan  <- back";
-    return "1-9 loan  j/k move  e edit-txn  d del-txn  E edit-loan  D del-loan  <- back";
+        return "1-9 loan  j/k move  Enter enact-payment  x extra-principal  n add  E edit-loan  D del-loan  <- back";
+    return "1-9 loan  j/k move  x extra-principal  e edit-txn  d del-txn  E edit-loan  D del-loan  <- back";
 }
 
 void loan_list_mark_dirty(loan_list_state_t *ls) {

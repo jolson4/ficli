@@ -4767,6 +4767,142 @@ int db_get_loan_remaining_principal_cents(sqlite3 *db, int64_t account_id,
     return 0;
 }
 
+int64_t db_enact_loan_extra_principal_payment(sqlite3 *db, int64_t account_id,
+                                              int64_t from_account_id,
+                                              int64_t principal_cents,
+                                              const char *date) {
+    if (account_id <= 0 || from_account_id <= 0 || from_account_id == account_id ||
+        principal_cents <= 0 || !date || date[0] == '\0')
+        return -1;
+
+    loan_profile_t profile = {0};
+    int rc = db_get_loan_profile_by_account(db, account_id, &profile);
+    if (rc != 0)
+        return (rc == -2) ? -2 : -1;
+
+    char norm_date[11];
+    if (normalize_txn_date(date, norm_date) != 0)
+        return -1;
+
+    account_type_t from_type = ACCOUNT_CASH;
+    if (db_get_account_type_by_id(db, from_account_id, &from_type) != 0)
+        return -1;
+    if (from_type == ACCOUNT_LOAN)
+        return -1;
+
+    int64_t principal_cat = profile.split_principal_category_id;
+    int64_t interest_cat = profile.split_interest_category_id;
+    int64_t escrow_cat = profile.split_escrow_category_id;
+    if (db_ensure_loan_split_categories(db, profile.loan_kind, &principal_cat,
+                                        &interest_cat, &escrow_cat) < 0)
+        return -1;
+
+    transaction_t txn = {0};
+    txn.amount_cents = principal_cents;
+    txn.type = TRANSACTION_EXPENSE;
+    txn.account_id = account_id;
+    txn.category_id = 0;
+    snprintf(txn.date, sizeof(txn.date), "%s", norm_date);
+    txn.reflection_date[0] = '\0';
+    snprintf(txn.payee, sizeof(txn.payee), "Loan Payment");
+    snprintf(txn.description, sizeof(txn.description), "Extra principal payment");
+
+    int rc_tx = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    if (rc_tx != SQLITE_OK) {
+        fprintf(stderr, "db_enact_loan_extra_principal_payment begin: %s\n",
+                sqlite3_errmsg(db));
+        return -1;
+    }
+
+    transaction_t transfer_txn = {0};
+    transfer_txn.amount_cents = principal_cents;
+    transfer_txn.type = TRANSACTION_TRANSFER;
+    transfer_txn.account_id = from_account_id;
+    transfer_txn.category_id = 0;
+    snprintf(transfer_txn.date, sizeof(transfer_txn.date), "%s", norm_date);
+    transfer_txn.reflection_date[0] = '\0';
+    snprintf(transfer_txn.payee, sizeof(transfer_txn.payee), "Loan Payment");
+    snprintf(transfer_txn.description, sizeof(transfer_txn.description),
+             "Transfer for extra principal");
+
+    int64_t transfer_from_id = 0;
+    if (insert_transfer_row(db, &transfer_txn, from_account_id, 0,
+                            &transfer_from_id) < 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    int64_t transfer_to_id = 0;
+    if (insert_transfer_row(db, &transfer_txn, account_id, transfer_from_id,
+                            &transfer_to_id) < 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    sqlite3_stmt *link_stmt = NULL;
+    int rc_link = sqlite3_prepare_v2(
+        db, "UPDATE transactions SET transfer_id = ? WHERE id = ?", -1,
+        &link_stmt, NULL);
+    if (rc_link != SQLITE_OK) {
+        fprintf(stderr,
+                "db_enact_loan_extra_principal_payment prepare link transfer: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    sqlite3_bind_int64(link_stmt, 1, transfer_from_id);
+    sqlite3_bind_int64(link_stmt, 2, transfer_from_id);
+    rc_link = sqlite3_step(link_stmt);
+    sqlite3_finalize(link_stmt);
+    if (rc_link != SQLITE_DONE) {
+        fprintf(stderr,
+                "db_enact_loan_extra_principal_payment step link transfer: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    int64_t txn_id = db_insert_transaction(db, &txn);
+    if (txn_id <= 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    (void)transfer_to_id;
+
+    txn_split_t split = {0};
+    split.category_id = principal_cat;
+    split.amount_cents = principal_cents;
+
+    int split_rc = replace_transaction_splits_in_tx(db, txn_id, &split, 1);
+    if (split_rc != 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    if ((profile.split_principal_category_id != principal_cat) ||
+        (profile.split_interest_category_id != interest_cat) ||
+        (profile.split_escrow_category_id != escrow_cat)) {
+        profile.split_principal_category_id = principal_cat;
+        profile.split_interest_category_id = interest_cat;
+        profile.split_escrow_category_id = escrow_cat;
+        if (db_upsert_loan_profile(db, &profile) != 0) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+    }
+
+    rc_tx = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    if (rc_tx != SQLITE_OK) {
+        fprintf(stderr, "db_enact_loan_extra_principal_payment commit: %s\n",
+                sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+
+    return txn_id;
+}
+
 int64_t db_enact_loan_payment(sqlite3 *db, int64_t account_id) {
     if (account_id <= 0)
         return -1;
