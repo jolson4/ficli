@@ -1021,17 +1021,34 @@ void loan_list_draw(loan_list_state_t *ls, WINDOW *win, bool focused) {
     int h, w;
     getmaxyx(win, h, w);
 
+    // -- Loan tabs (row 1 inside box) --
+    int tab_col = 2;
+    for (int i = 0; i < ls->profile_count && tab_col < w - 2; i++) {
+        char label[96];
+        snprintf(label, sizeof(label), "%d:%s", i + 1, ls->profiles[i].account_name);
+        int len = (int)strlen(label);
+
+        if (i == ls->profile_sel) {
+            wattron(win, COLOR_PAIR(COLOR_SELECTED));
+            mvwprintw(win, 1, tab_col, "%s", label);
+            wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+        } else {
+            mvwprintw(win, 1, tab_col, "%s", label);
+        }
+        tab_col += len + 2;
+    }
+
     if (focused && ls->cursor == -1)
         wattron(win, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
-    mvwprintw(win, 1, 2, "[ Add Loan Profile ]");
+    mvwprintw(win, 2, 2, "[ Add Loan Profile ]");
     if (focused && ls->cursor == -1)
         wattroff(win, COLOR_PAIR(COLOR_FORM_ACTIVE) | A_BOLD);
     if (ls->message[0] != '\0')
-        mvwprintw(win, 2, 2, "%s", ls->message);
+        mvwprintw(win, 3, 2, "%s", ls->message);
 
     if (ls->profile_count <= 0) {
-        mvwprintw(win, 4, 2, "No loan profiles configured.");
-        mvwprintw(win, 5, 2, "Press 'n' to add one for an existing account.");
+        mvwprintw(win, 5, 2, "No loan profiles configured.");
+        mvwprintw(win, 6, 2, "Press 'n' to add one for an existing account.");
         return;
     }
 
@@ -1049,22 +1066,22 @@ void loan_list_draw(loan_list_state_t *ls, WINDOW *win, bool focused) {
     format_signed_cents(ls->remaining_principal_cents, false, remaining_principal,
                         sizeof(remaining_principal));
 
-    mvwprintw(win, 3, 2, "Loan %d/%d  Account: %s  Kind: %s", ls->profile_sel + 1,
+    mvwprintw(win, 4, 2, "Loan %d/%d  Account: %s  Kind: %s", ls->profile_sel + 1,
               ls->profile_count, profile->account_name,
               loan_kind_label(profile->loan_kind));
-    mvwprintw(win, 4, 2,
+    mvwprintw(win, 5, 2,
               "Start: %s  Rate: %d.%02d%%  Initial: %s  Scheduled: %s  Day:%d  Next:%s",
               profile->start_date, profile->interest_rate_bps / 100,
               profile->interest_rate_bps % 100, principal, scheduled,
               profile->payment_day, ls->has_next_due ? ls->next_due_date : "(n/a)");
-    mvwprintw(win, 5, 2, "Escrow: %s  Principal/Interest: auto amortized",
+    mvwprintw(win, 6, 2, "Escrow: %s  Principal/Interest: auto amortized",
               split_escrow);
-    mvwprintw(win, 6, 2, "Remaining principal: %s",
+    mvwprintw(win, 7, 2, "Remaining principal: %s",
               ls->has_remaining_principal ? remaining_principal : "(n/a)");
 
-    int header_row = 8;
-    int rule_row = 9;
-    int data_start = 10;
+    int header_row = 9;
+    int rule_row = 10;
+    int data_start = 11;
     int visible_rows = h - data_start - 1;
     if (visible_rows < 1)
         visible_rows = 1;
@@ -1373,6 +1390,8 @@ bool loan_list_handle_input(loan_list_state_t *ls, WINDOW *parent, int ch) {
 const char *loan_list_status_hint(const loan_list_state_t *ls) {
     if (!ls)
         return "";
+    if (ls->cursor == -1 && ls->profile_count > 0)
+        return "1-9 loan  Enter add-profile  j/k move  n add  x extra-principal  E edit-loan  D del-loan  <- back";
     if (ls->cursor == -1)
         return "Enter add-profile  j/k move  n add  x extra-principal  E edit-loan  D del-loan  <- back";
     if (ls->profile_count <= 0)
