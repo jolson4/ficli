@@ -1,169 +1,51 @@
-# ficli - Personal Finance CLI
+# ficli - Agent Session Guide
 
-> **Start here:** Read [CODEBASE.md](CODEBASE.md) for a detailed map of every file, struct, color pair, and architectural pattern. It saves significant exploration time.
+This file is the fast, accurate starting point for future coding sessions.
 
-## Project Overview
-A terminal-based personal finance app for tracking expenses, income, and transfers. Built in C with an ncurses UI and SQLite persistence.
+## Start Here
+- Read `agents.md` first, then open `TODO.md` for active roadmap work.
+- Treat `CODEBASE.md` as supplemental context. It is useful, but can lag behind current implementation details.
+- Build quickly with `make` and run with `./ficli` (or `make run`).
 
-## Tech Stack
-- **Language:** C (C23 standard)
-- **UI:** ncursesw
-- **Build:** Make
-- **Storage:** SQLite (single local file)
-- **Platform:** Linux
-- **Version Control:** Git (use `git diff` to reference changes during discussions)
+## What ficli Is
+- A local-first terminal personal finance app in C using `ncursesw` + SQLite/SQLCipher.
+- Single binary (`ficli`) with no network services.
+- Core domain: accounts, categories, transactions, transfers, budgets, reports, loans, and imports.
 
-## Architecture Decisions
-- Single-binary CLI tool
-- Local-only data (no networking)
-- SQLite for persistent storage (simple, zero-config, single-file)
-- ncurses for interactive terminal UI with keyboard-driven navigation
+## Current Runtime Facts
+- DB file: `~/.local/share/ficli/ficli.db`.
+- DB encryption key required at startup (`PRAGMA key`). Build prefers `sqlcipher` via pkg-config and falls back to `sqlite3` when unavailable.
+- Key lookup order in `src/main.c`: 1Password CLI (`op read ...`), saved key file, then UI password prompt.
+- Saved key path defaults to `~/.config/ficli/db.key` (or `XDG_CONFIG_HOME/ficli/db.key`), overrideable with `FICLI_DB_KEY_FILE`.
+- Theme preference stored in `~/.config/ficli/config.ini` as `theme=dark|light`.
 
-## Core Features (Current)
-- Transaction CRUD for expense, income, and transfer entries
-- Per-account transaction list with sort/filter/search and keyboard-first navigation
-- Bulk transaction selection/edit plus quick category edit shortcut (`c`)
-- Payee-aware auto-categorization prompts for uncategorized matches
-- Account management UI (add/edit/delete) with account types and credit-card last4
-- Category management UI (add/edit/delete), including parent/child categories (`Parent:Child`)
-- Budget tracking UI with parent-category rollups, child spend detail, month navigation, and effective-month budget rules
-- CSV/QIF import flows for credit card and checking/savings statements with deduplication
-- Account summaries and 90-day balance chart in Transactions view
-- Theme toggle (`t`) with persisted preference
-- Resize-aware layout handling and in-app keyboard shortcut reference (`?`)
+## Main Code Map
+- `src/main.c`: startup path resolution, key retrieval/prompt flow, DB/UI lifecycle.
+- `src/db/db.c`: schema creation, migrations, default seed data, encryption/PRAGMA setup.
+- `src/db/query.c` + `include/db/query.h`: all domain queries and mutations (accounts, categories, transactions, transfers, budgets, reports, loans, splits, filters).
+- `src/ui/ui.c`: ncurses shell, screen routing, global key handling, focus model, popups.
+- `src/ui/*.c`: screen modules (`dashboard_list`, `txn_list`, `account_list`, `loan_list`, `category_list`, `budget_list`, `report_list`) plus forms/import/error UI.
+- `src/csv/csv_import.c`: CSV/QIF parsing and import mapping.
 
-## Project Structure (High-level)
-`CODEBASE.md` is the canonical file-by-file map. Keep this section concise for orientation.
+## UI Screens (Implemented)
+- Dashboard, Transactions, Accounts, Loans, Categories, Budgets, Reports (`include/ui/screens.def`).
+- Global shortcuts include add transaction (`a`), import (`i`), auto-link transfers (`L`), theme toggle (`t`), and help (`?`).
+- Transactions view supports per-account tabs, sorting/filtering, multi-select edits, quick category edit, and transfer workflows.
+- Budgets and Reports both support drill-down into matching transactions and in-place edits from detail rows.
 
-```
-ficli/
-  src/
-    main.c              # Entry point + DB path bootstrap
-    db/                 # Schema init/migrations + query layer
-    ui/                 # Main loop, screen modules, forms, popups
-    csv/                # CSV parse + import workflows
-  include/
-    db/                 # DB APIs (`db.h`, `query.h`)
-    ui/                 # UI APIs (`ui.h`, list modules, forms, dialogs, colors)
-    csv/                # CSV parse/import API
-    models/             # account/category/transaction/budget structs/enums
-  build/                # Build artifacts
-  ficli_seed.sql        # Optional seed restore file
-  CODEBASE.md           # Detailed architecture and file map
-  Makefile
-  CLAUDE.md
-```
+## Data Model Highlights
+- Amounts stored as integer cents.
+- Effective/reporting date is `COALESCE(reflection_date, date)`.
+- Accounts include types: CASH, CHECKING, SAVINGS, CREDIT_CARD, PHYSICAL_ASSET, INVESTMENT, LOAN.
+- Loan support includes loan profiles and payment/split bookkeeping (`loan_profiles`, `transaction_splits`).
+- Budget behavior includes effective-month rules + one-month overrides + category include/exclude filters.
 
-## Conventions
-- Use snake_case for functions and variables
-- Prefix module functions with module name (e.g., `db_init()`, `ui_draw_menu()`)
-- Header guards use `FICLI_FILENAME_H`
-- Keep functions short and focused
-- Free all allocated memory; no leaks
-- When completing a Status item, ALWAYS link to its plan document (e.g., `([plan](../.claude/plans/name.md))`)
-- This is in early stage development, with fully malleable data in the DB. Feel free to run SQL queries directly as we change the schema.
+## Working Conventions
+- Keep changes small and module-local where possible.
+- Maintain existing C style (snake_case, explicit bounds handling, early returns).
+- Prefer updating query-layer helpers over embedding SQL in UI modules.
+- If changing schema or query semantics, update both `src/db/db.c` and `include/db/query.h`/`src/db/query.c` coherently.
 
-## Build & Run
-```
-make          # build
-make run      # build + run
-make clean    # clean build artifacts
-./ficli       # run
-```
-
-## Database
-- **Path:** `~/.local/share/ficli/ficli.db` (created automatically)
-- **Amounts:** Stored as integers in cents to avoid floating-point issues
-- **Dates:** `date` is the posted/processed date; optional `reflection_date` controls reporting/budget bucket via `COALESCE(reflection_date, date)`
-- **Categories:** Have a type (`EXPENSE`/`INCOME`) and optional `parent_id` for sub-categories (displayed as `Parent:Child`)
-- **Accounts:** Each transaction belongs to an account; transfers are two linked transactions sharing a `transfer_id`
-- **Defaults seeded on first run:** 1 account (Cash), 9 expense categories, 4 income categories
-- **Theme config:** `~/.config/ficli/config.ini` (`theme=dark|light`)
-- **Seed backup file:** `ficli_seed.sql` (repo root). To use it: `sqlite3 ~/.local/share/ficli/ficli.db < ficli_seed.sql`
-
-## Status
-- [x] Project scaffolding and build system
-- [x] Database schema and initialization
-- [x] Basic ncurses UI framework ([plan](../.claude/plans/gentle-strolling-lighthouse.md))
-- [x] Transaction input form ([plan](../.claude/plans/b3d42bcf-a861-4f8f-aec5-fe893c511847.md))
-- [x] Transaction list view per account ([plan](../.claude/plans/buzzing-growing-fog.md))
-- [x] Add UI to add new accounts ([plan](../.claude/plans/stateless-wibbling-plum.md))
-- [x] Add a "Type" property to accounts (Cash, Checking, Savings, Credit Card, Physical Asset, Investment, Loan) ([plan](../.claude/plans/sequential-percolating-starlight.md))
-- [x] Allow editing/deleting transactions
-- [x] Support sort and filter in transaction list ([plan](../.claude/plans/fluttering-shimmying-river.md))
-- [x] Allow hjkl navigation, matching arrow keys
-- [x] Show keyboard commands when user hits ?
-- [x] Align table header row
-- [x] Improve color theme
-- [x] Add card number to CC accounts
-- [x] Data import (CSV) ([plan](../.claude/plans/csv-import.md))
-- [x] Make `s` for sort select columns in the correct order
-- [x] Add a Payee field to transactions
-- [x] Prevent duplicate transactions when importing CSVs
-- [x] Add "Submit" button when adding an account
-- [x] Allow toggling light/dark mode via `t` shortcut
-- [x] Show new account in Transactions view
-- [x] Allow editing/deleting accounts
-- [x] Show summary information in header
-- [x] When adding category to a transaction, offer to apply same change to all transactions with the same payee and no category
-- [x] Allow user to add new category on the fly when categorizing a transaction, including sub-category support (e.g., "Food:Dining Out") ([plan](../.claude/plans/on-the-fly-category-creation.md))
-- [x] Allow user to edit only category by hitting `c` on a transaction, without opening the full edit form ([plan](../.claude/plans/quick-category-edit-shortcut.md))
-- [x] Allow bulk editing transactions (e.g., for categorization), maybe by selecting multiple transactions with spacebar and then hitting `e` to edit all selected transactions
-- [x] Allow adding, editing, and deleting Categories in categories UI
-- [x] Use ctrl-d and ctrl-u for half-page down/up in transaction list
-- [x] Show chart of account balance over time ([plan](../.claude/plans/account-balance-chart.md))
-- [x] Add generic error popup that's centered, near the top of the UI. Use it to show error when account is added with naming conflict. ([plan](../.claude/plans/shared-error-popup-account-name-conflict.md))
-- [x] Add popout for keyboard shortcuts reference
-- [x] Support auto-categorization ([plan](../.claude/plans/auto-categorization-import-payee.md))
-- [x] Allow user to type to filter dropdowns ([plan](../.claude/plans/dropdown-type-filter.md))
-- [x] Handle window resizing better: debounce resize events, and make sure all UI components adjust correctly without user interaction with UI ([plan](../.claude/plans/window-resize-debounce.md))
-- [x] Allow "reflection date" field for transactions to let user control where they're bucketed for reports and budgets without editing actual transaction date
-- [x] Automatically enter inverse transaction for transfers
-- [x] Budget tracking ([plan](../.claude/plans/budget-tracking-v1.md))
-- [x] Show related transactions in Budget view on "Enter"; only edit on `e` ([plan](../.claude/plans/budget-related-transactions-on-enter.md))
-- [x] Enforce a minimum window width and height. Show a full-screen message if window is too small, giving dimensions.
-- [x] Show total progress towards budget in Budget view, with a progress bar that indicates expected progress for the current date ([plan](../.claude/plans/budget-total-progress-expected-progress-bar.md))
-- [x] Support importing from QIF ([plan](../.claude/plans/qif-import.md))
-- [x] Keep cursor on edited transaction when categorizing, including when applying category changes to multiple transactions at once ([plan](../.claude/plans/keep-cursor-on-categorize-bulk.md))
-- [x] Allow uncategorizing transactions in `e` or `c` mode ([plan](../.claude/plans/uncategorize-transaction-edit.md))
-- [x] Allow mass-renaming payee after filtering transactions list ([plan](../.claude/plans/mass-rename-payee-filtered-list.md))
-- [x] Make QIF import include categorization. Prompt user to create new category, assign to other category, or leave uncategorized when QIF transaction has a category that doesn't exist in the app yet. (Also applies category fields from CSV imports.) ([plan](../.claude/plans/import-category-qif-csv.md))
-- [x] Allow category/subcategory include-exclude toggles for budget calculations, with global mode for excluding selected categories or only including selected categories
-- [x] Show running deficit or surplus in budget view based on this year's actuals vs. expected progress through the current date. We should show a top-level running surplus/deficit number and per-category surplus/deficit numbers in the category list, between the "Budget" and "Net" columns.
-- [x] Update budget to show rows for budgeted categories, then in a lower table, "Unbudgeted Categories" show the remaining transactions (in the UI this should be between the "Budgeted Categories" table and the individual trtansactions table
-- [x] Rename "Run" column in budget view to "Running +/-"
-- [x] Make entire budget view scrollable, not the individual tables
-- [x] Don't include transfers in the "Transactions" view header lines calculations ([plan](../.claude/plans/transactions-header-exclude-transfers.md))
-- [x] Reports page: Show "Category" and "Payee" summary pages for different time periods ([plan](../.claude/plans/reports-category-payee-tabs.md))
-- [x] Allow hitting enter on row in reports page to see a transactions list filtered to that category or payee (similat to what we do in Budgets view) ([plan](../.claude/plans/reports-enter-matching-transactions.md))
-- [x] Allow user to specify "This edit to the budget only applies to the current month"
-- [x] When multi-selecting, show another header row with the count of selected transactions and the sum of their amounts, "Income", "Expense", and "Net" totals for the selected transactions ([plan](../.claude/plans/multi-select-header-totals.md))
-- [ ] Allow user to create an account when adding a new loan profile
-- [ ] Add an "Assets" view to track physical assets
-- [ ] Add a "Loans" view ([plan](../.claude/plans/loans-view-v1.md))
-- [ ] Allow user to say if a category is an "Expense" or "Income" category
-- [ ] Don't show "Income" in Credit Card account headers
-- [ ] Make edit Category popout larger
-- [ ] Support adding a budget for a hidden category in budgets view (since we currenly only show categories matching transactions in the current month)
-- [ ] Add CLI arguments for quick actions (e.g., `ficli import -account "CapitalOne" -file ~/Downloads/transactions.csv`) or `ficli import` which then queries for accounts and asks which file in ~/Downloads relates to each account (allowing skipping that account if no file matches)
-- [x] Show summary information on Accounts page. E.g. net cash balance, total value (including assets and investments) ([plan](../.claude/plans/accounts-page-summary.md))
-- [ ] Allow annual budget for categories with monthly breakdowns
-- [ ] Automatically convert transaction to transfer when importing a transaction and there's a matching transaction in another account
-- [ ] Add investment purchases/sales with cost basis tracking
-- [ ] Allow user to send set of selected transactions to LLM for auto-categorization
-- [ ] Allow user to choose when to save changes; don't persist anything until they save
-- [ ] Offer to auto-create accounts when importing transactions with an account that doesn't exist yet
-- [ ] Delegate import logic across CPU cores for perf
-- [ ] Prevent keyboard events from hitting UI behind the keyboard shortcut popout
-- [ ] Allow filtering transactions list using regex
-- [ ] Allow archiving accounts
-- [ ] Support CSV imports for investment accounts
-- [ ] Data export (CSV)
-- [ ] Support split transactions
-- [ ] Add row indices to transaction list
-- [ ] Add undo logic
-- [ ] When deleting a category, offer to reassign transactions to another category
-- [ ] Add reconciliation
-- [ ] Add password protection and encryption
-- [ ] Allow user to choose whether to delete linked transfer transactions when deleting a transaction
-- [ ] Add error UI for handling logic mismatches, e.g. transfers with more than 2 transactions
+## Active Work Tracking
+- All incomplete roadmap items live in `TODO.md`.
+- Do not re-add completed status history here; keep this file focused on onboarding and current architecture reality.
