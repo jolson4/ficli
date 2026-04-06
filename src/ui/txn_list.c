@@ -230,7 +230,7 @@ static bool txn_list_pick_account_popup(txn_list_state_t *ls, WINDOW *parent) {
     if (sel < 0 || sel >= ls->account_count)
         sel = 0;
     int scroll = 0;
-    int visible = win_h - 4;
+    int visible = win_h - 5;
     if (visible < 1)
         visible = 1;
     bool chosen = false;
@@ -252,7 +252,7 @@ static bool txn_list_pick_account_popup(txn_list_state_t *ls, WINDOW *parent) {
         werase(w);
         box(w, 0, 0);
         mvwprintw(w, 0, 2, " Select Account ");
-        mvwprintw(w, 1, 2, "j/k move  Enter select  Esc cancel");
+        mvwprintw(w, 1, 2, "Up/Down move  Enter select  Esc cancel");
 
         for (int i = 0; i < visible; i++) {
             int idx = scroll + i;
@@ -260,14 +260,28 @@ static bool txn_list_pick_account_popup(txn_list_state_t *ls, WINDOW *parent) {
                 break;
             int row = 2 + i;
             bool selected = (idx == sel);
-            if (selected)
+            if (selected) {
                 wattron(w, COLOR_PAIR(COLOR_SELECTED));
+                wattron(w, A_BOLD);
+                wattron(w, A_REVERSE);
+            }
             mvwprintw(w, row, 2, "%*s", win_w - 4, "");
-            mvwprintw(w, row, 2, "%d: %-*.*s", idx + 1, win_w - 7, win_w - 7,
+            mvwprintw(w, row, 2, "%c%d: %-*.*s", selected ? '>' : ' ', idx + 1,
+                      win_w - 8, win_w - 8,
                       ls->accounts[idx].name);
-            if (selected)
+            if (selected) {
+                wattroff(w, A_REVERSE);
+                wattroff(w, A_BOLD);
                 wattroff(w, COLOR_PAIR(COLOR_SELECTED));
+            }
         }
+
+        if (scroll > 0)
+            mvwaddch(w, 2, win_w - 2, ACS_UARROW);
+        if (scroll + visible < ls->account_count)
+            mvwaddch(w, 1 + visible, win_w - 2, ACS_DARROW);
+
+        mvwprintw(w, win_h - 2, 2, "Account %d/%d", sel + 1, ls->account_count);
 
         wrefresh(w);
         int ch = wgetch(w);
