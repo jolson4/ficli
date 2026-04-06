@@ -199,24 +199,93 @@ static const char *form_dropdown_item_name(const form_state_t *fs, int idx) {
     return CATEGORY_OPTION_UNCATEGORIZED;
 }
 
+static bool form_dropdown_item_matches_query(const form_state_t *fs, int idx,
+                                             const char *query) {
+    if (!query || query[0] == '\0')
+        return true;
+    return contains_case_insensitive(form_dropdown_item_name(fs, idx), query);
+}
+
+static int form_dropdown_visible_count_for_query(const form_state_t *fs,
+                                                 const char *query) {
+    int count = form_dropdown_count(fs);
+    int visible = 0;
+    for (int i = 0; i < count; i++) {
+        if (form_dropdown_item_matches_query(fs, i, query))
+            visible++;
+    }
+    return visible;
+}
+
+static int form_dropdown_visible_count(const form_state_t *fs) {
+    return form_dropdown_visible_count_for_query(fs, fs->dropdown_filter);
+}
+
+static int form_dropdown_visible_index_to_actual_for_query(const form_state_t *fs,
+                                                           int visible_idx,
+                                                           const char *query) {
+    if (visible_idx < 0)
+        return -1;
+    int count = form_dropdown_count(fs);
+    int seen = 0;
+    for (int i = 0; i < count; i++) {
+        if (!form_dropdown_item_matches_query(fs, i, query))
+            continue;
+        if (seen == visible_idx)
+            return i;
+        seen++;
+    }
+    return -1;
+}
+
+static int form_dropdown_visible_index_to_actual(const form_state_t *fs,
+                                                 int visible_idx) {
+    return form_dropdown_visible_index_to_actual_for_query(fs, visible_idx,
+                                                           fs->dropdown_filter);
+}
+
+static int form_dropdown_actual_to_visible_index_for_query(const form_state_t *fs,
+                                                           int actual_idx,
+                                                           const char *query) {
+    if (actual_idx < 0)
+        return -1;
+    int count = form_dropdown_count(fs);
+    int visible_idx = 0;
+    for (int i = 0; i < count; i++) {
+        if (!form_dropdown_item_matches_query(fs, i, query))
+            continue;
+        if (i == actual_idx)
+            return visible_idx;
+        visible_idx++;
+    }
+    return -1;
+}
+
+static int form_dropdown_actual_to_visible_index(const form_state_t *fs,
+                                                 int actual_idx) {
+    return form_dropdown_actual_to_visible_index_for_query(fs, actual_idx,
+                                                           fs->dropdown_filter);
+}
+
 static void form_reset_dropdown_filter(form_state_t *fs) {
     fs->dropdown_filter_len = 0;
     fs->dropdown_filter[0] = '\0';
 }
 
-static bool form_dropdown_find_match(const form_state_t *fs, const char *query,
-                                     int *out_idx) {
-    if (!out_idx || !query || query[0] == '\0')
-        return false;
+static void form_draw_dropdown_filter_hint(const form_state_t *fs, int row) {
+    if (!fs || !fs->win || row < 0)
+        return;
 
-    int count = form_dropdown_count(fs);
-    for (int i = 0; i < count; i++) {
-        if (contains_case_insensitive(form_dropdown_item_name(fs, i), query)) {
-            *out_idx = i;
-            return true;
-        }
-    }
-    return false;
+    int max_y = getmaxy(fs->win);
+    if (row >= max_y - 1)
+        return;
+
+    wattron(fs->win, COLOR_PAIR(COLOR_FORM_DROPDOWN));
+    mvwprintw(fs->win, row, FIELD_COL, "%-*s", FIELD_WIDTH,
+              fs->dropdown_filter_len > 0 ? fs->dropdown_filter : "");
+    mvwprintw(fs->win, row, FIELD_COL, "Filter: %.*s", FIELD_WIDTH - 8,
+              fs->dropdown_filter);
+    wattroff(fs->win, COLOR_PAIR(COLOR_FORM_DROPDOWN));
 }
 
 static bool form_dropdown_handle_filter_key(form_state_t *fs, int ch) {
@@ -224,10 +293,11 @@ static bool form_dropdown_handle_filter_key(form_state_t *fs, int ch) {
         if (fs->dropdown_filter_len > 0) {
             fs->dropdown_filter_len--;
             fs->dropdown_filter[fs->dropdown_filter_len] = '\0';
-            if (fs->dropdown_filter_len > 0) {
-                int idx = fs->dropdown_sel;
-                if (form_dropdown_find_match(fs, fs->dropdown_filter, &idx))
-                    fs->dropdown_sel = idx;
+            if (form_dropdown_visible_count(fs) > 0 &&
+                form_dropdown_actual_to_visible_index(fs, fs->dropdown_sel) < 0) {
+                int first = form_dropdown_visible_index_to_actual(fs, 0);
+                if (first >= 0)
+                    fs->dropdown_sel = first;
             }
         }
         return true;
@@ -239,28 +309,14 @@ static bool form_dropdown_handle_filter_key(form_state_t *fs, int ch) {
     if (fs->dropdown_filter_len >= (int)sizeof(fs->dropdown_filter) - 1)
         return true;
 
-    char candidate[sizeof(fs->dropdown_filter)];
-    memcpy(candidate, fs->dropdown_filter, (size_t)fs->dropdown_filter_len);
-    candidate[fs->dropdown_filter_len] = (char)ch;
-    candidate[fs->dropdown_filter_len + 1] = '\0';
+    fs->dropdown_filter[fs->dropdown_filter_len++] = (char)ch;
+    fs->dropdown_filter[fs->dropdown_filter_len] = '\0';
 
-    int idx = fs->dropdown_sel;
-    if (form_dropdown_find_match(fs, candidate, &idx)) {
-        fs->dropdown_filter_len++;
-        fs->dropdown_filter[fs->dropdown_filter_len - 1] = (char)ch;
-        fs->dropdown_filter[fs->dropdown_filter_len] = '\0';
-        fs->dropdown_sel = idx;
-        return true;
-    }
-
-    candidate[0] = (char)ch;
-    candidate[1] = '\0';
-    idx = fs->dropdown_sel;
-    if (form_dropdown_find_match(fs, candidate, &idx)) {
-        fs->dropdown_filter_len = 1;
-        fs->dropdown_filter[0] = (char)ch;
-        fs->dropdown_filter[1] = '\0';
-        fs->dropdown_sel = idx;
+    if (form_dropdown_visible_count(fs) > 0 &&
+        form_dropdown_actual_to_visible_index(fs, fs->dropdown_sel) < 0) {
+        int first = form_dropdown_visible_index_to_actual(fs, 0);
+        if (first >= 0)
+            fs->dropdown_sel = first;
     }
     return true;
 }
@@ -614,26 +670,41 @@ static void form_draw(form_state_t *fs) {
 static void form_draw_dropdown(form_state_t *fs) {
     WINDOW *w = fs->win;
     int base_row;
-    int count;
     if (fs->current_field == FIELD_ACCOUNT) {
         base_row = field_row(FIELD_ACCOUNT) + 1;
-        count = fs->account_count;
     } else {
         base_row = field_row(FIELD_CATEGORY) + 1;
-        count = form_dropdown_count(fs);
     }
 
-    int visible = count < MAX_DROP ? count : MAX_DROP;
+    int match_count = form_dropdown_visible_count(fs);
+    int visible = match_count < MAX_DROP ? match_count : MAX_DROP;
+    int selected_visible =
+        form_dropdown_actual_to_visible_index(fs, fs->dropdown_sel);
+
+    if (selected_visible < 0 && match_count > 0)
+        selected_visible = 0;
 
     // Clamp scroll
-    if (fs->dropdown_sel < fs->dropdown_scroll)
-        fs->dropdown_scroll = fs->dropdown_sel;
-    if (fs->dropdown_sel >= fs->dropdown_scroll + visible)
-        fs->dropdown_scroll = fs->dropdown_sel - visible + 1;
+    if (selected_visible < fs->dropdown_scroll)
+        fs->dropdown_scroll = selected_visible;
+    if (selected_visible >= fs->dropdown_scroll + visible)
+        fs->dropdown_scroll = selected_visible - visible + 1;
+
+    if (match_count <= 0) {
+        wattron(w, COLOR_PAIR(COLOR_FORM_DROPDOWN));
+        mvwprintw(w, base_row, FIELD_COL, "%-*s", FIELD_WIDTH, "No matches");
+        wattroff(w, COLOR_PAIR(COLOR_FORM_DROPDOWN));
+        form_draw_dropdown_filter_hint(fs, base_row + 1);
+        wnoutrefresh(w);
+        return;
+    }
 
     for (int i = 0; i < visible; i++) {
-        int idx = fs->dropdown_scroll + i;
-        bool selected = (idx == fs->dropdown_sel);
+        int visible_idx = fs->dropdown_scroll + i;
+        int idx = form_dropdown_visible_index_to_actual(fs, visible_idx);
+        if (idx < 0)
+            break;
+        bool selected = (visible_idx == selected_visible);
 
         if (selected) {
             wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
@@ -655,11 +726,15 @@ static void form_draw_dropdown(form_state_t *fs) {
     // Show scroll indicators
     if (fs->dropdown_scroll > 0)
         mvwaddch(w, base_row, FIELD_COL + FIELD_WIDTH, ACS_UARROW);
-    if (fs->dropdown_scroll + visible < count)
+    if (fs->dropdown_scroll + visible < match_count)
         mvwaddch(w, base_row + visible - 1, FIELD_COL + FIELD_WIDTH,
                  ACS_DARROW);
 
-    wmove(w, base_row + fs->dropdown_sel - fs->dropdown_scroll, FIELD_COL);
+    if (selected_visible >= fs->dropdown_scroll &&
+        selected_visible < fs->dropdown_scroll + visible) {
+        wmove(w, base_row + selected_visible - fs->dropdown_scroll, FIELD_COL);
+    }
+    form_draw_dropdown_filter_hint(fs, base_row + visible);
     wnoutrefresh(w);
 }
 
@@ -764,18 +839,35 @@ static void category_form_draw(form_state_t *fs) {
 
 static void category_form_draw_dropdown(form_state_t *fs) {
     WINDOW *w = fs->win;
-    int count = form_dropdown_count(fs);
+    int count = form_dropdown_visible_count(fs);
     int base_row = CATEGORY_FIELD_ROW + 1;
     int visible = count < MAX_DROP ? count : MAX_DROP;
+    int selected_visible =
+        form_dropdown_actual_to_visible_index(fs, fs->dropdown_sel);
 
-    if (fs->dropdown_sel < fs->dropdown_scroll)
-        fs->dropdown_scroll = fs->dropdown_sel;
-    if (fs->dropdown_sel >= fs->dropdown_scroll + visible)
-        fs->dropdown_scroll = fs->dropdown_sel - visible + 1;
+    if (selected_visible < 0 && count > 0)
+        selected_visible = 0;
+
+    if (selected_visible < fs->dropdown_scroll)
+        fs->dropdown_scroll = selected_visible;
+    if (selected_visible >= fs->dropdown_scroll + visible)
+        fs->dropdown_scroll = selected_visible - visible + 1;
+
+    if (count <= 0) {
+        wattron(w, COLOR_PAIR(COLOR_FORM_DROPDOWN));
+        mvwprintw(w, base_row, FIELD_COL, "%-*s", FIELD_WIDTH, "No matches");
+        wattroff(w, COLOR_PAIR(COLOR_FORM_DROPDOWN));
+        form_draw_dropdown_filter_hint(fs, base_row + 1);
+        wnoutrefresh(w);
+        return;
+    }
 
     for (int i = 0; i < visible; i++) {
-        int idx = fs->dropdown_scroll + i;
-        bool selected = (idx == fs->dropdown_sel);
+        int visible_idx = fs->dropdown_scroll + i;
+        int idx = form_dropdown_visible_index_to_actual(fs, visible_idx);
+        if (idx < 0)
+            break;
+        bool selected = (visible_idx == selected_visible);
         if (selected) {
             wattron(w, COLOR_PAIR(COLOR_FORM_ACTIVE));
         } else {
@@ -798,6 +890,7 @@ static void category_form_draw_dropdown(form_state_t *fs) {
         mvwaddch(w, base_row + visible - 1, FIELD_COL + FIELD_WIDTH,
                  ACS_DARROW);
 
+    form_draw_dropdown_filter_hint(fs, base_row + visible);
     wnoutrefresh(w);
 }
 
@@ -2328,19 +2421,39 @@ form_transaction_with_options(WINDOW *parent, sqlite3 *db, transaction_t *txn,
                 done = true;
                 continue;
             }
-            int count = form_dropdown_count(&fs);
+            int count = form_dropdown_visible_count(&fs);
             if (form_dropdown_handle_filter_key(&fs, ch))
                 continue;
             switch (ch) {
             case KEY_UP:
-                if (fs.dropdown_sel > 0)
-                    fs.dropdown_sel--;
+                if (count > 0) {
+                    int vis =
+                        form_dropdown_actual_to_visible_index(&fs, fs.dropdown_sel);
+                    if (vis < 0)
+                        vis = 0;
+                    if (vis > 0)
+                        vis--;
+                    int next = form_dropdown_visible_index_to_actual(&fs, vis);
+                    if (next >= 0)
+                        fs.dropdown_sel = next;
+                }
                 break;
             case KEY_DOWN:
-                if (fs.dropdown_sel < count - 1)
-                    fs.dropdown_sel++;
+                if (count > 0) {
+                    int vis =
+                        form_dropdown_actual_to_visible_index(&fs, fs.dropdown_sel);
+                    if (vis < 0)
+                        vis = 0;
+                    if (vis < count - 1)
+                        vis++;
+                    int next = form_dropdown_visible_index_to_actual(&fs, vis);
+                    if (next >= 0)
+                        fs.dropdown_sel = next;
+                }
                 break;
             case '\n':
+                if (count <= 0)
+                    break;
                 if (fs.current_field == FIELD_CATEGORY &&
                     fs.txn_type != TRANSACTION_TRANSFER &&
                     fs.dropdown_sel == fs.category_count + 1) {
@@ -2589,18 +2702,38 @@ form_result_t form_transaction_category(WINDOW *parent, sqlite3 *db,
                 done = true;
                 continue;
             }
-            int count = form_dropdown_count(&fs);
+            int count = form_dropdown_visible_count(&fs);
             if (ch == KEY_UP || ch == 'k') {
-                if (fs.dropdown_sel > 0)
-                    fs.dropdown_sel--;
+                if (count > 0) {
+                    int vis =
+                        form_dropdown_actual_to_visible_index(&fs, fs.dropdown_sel);
+                    if (vis < 0)
+                        vis = 0;
+                    if (vis > 0)
+                        vis--;
+                    int next = form_dropdown_visible_index_to_actual(&fs, vis);
+                    if (next >= 0)
+                        fs.dropdown_sel = next;
+                }
                 continue;
             }
             if (ch == KEY_DOWN || ch == 'j') {
-                if (fs.dropdown_sel < count - 1)
-                    fs.dropdown_sel++;
+                if (count > 0) {
+                    int vis =
+                        form_dropdown_actual_to_visible_index(&fs, fs.dropdown_sel);
+                    if (vis < 0)
+                        vis = 0;
+                    if (vis < count - 1)
+                        vis++;
+                    int next = form_dropdown_visible_index_to_actual(&fs, vis);
+                    if (next >= 0)
+                        fs.dropdown_sel = next;
+                }
                 continue;
             }
             if (ch == '\n') {
+                if (count <= 0)
+                    continue;
                 if (fs.dropdown_sel == fs.category_count + 1) {
                     form_close_dropdown(&fs, false);
                     if (form_create_category_on_the_fly(parent, &fs)) {
