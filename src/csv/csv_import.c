@@ -202,6 +202,25 @@ static void normalize_col(const char *src, char *dst, int dstlen) {
     dst[di] = '\0';
 }
 
+// Infer transaction direction from textual type labels used by some
+// checking/savings exports (e.g., Debit/Credit).
+// Returns -1 for expense/outflow, +1 for income/inflow, 0 if unknown.
+static int direction_from_txn_type(const char *src) {
+    if (!src)
+        return 0;
+
+    char norm[64];
+    normalize_col(src, norm, sizeof(norm));
+    if (norm[0] == '\0')
+        return 0;
+
+    if (strcmp(norm, "debit") == 0 || strstr(norm, "withdraw") != NULL)
+        return -1;
+    if (strcmp(norm, "credit") == 0 || strstr(norm, "deposit") != NULL)
+        return 1;
+    return 0;
+}
+
 // Normalize date to YYYY-MM-DD. Handles MM/DD/YYYY, MM/DD/YY, and
 // YYYY-MM-DD input, and also QIF style M/D'YY.
 // Returns true on success, false if format unrecognized.
@@ -541,13 +560,18 @@ static csv_parse_result_t csv_parse_stream(FILE *f) {
                 continue;
             }
 
-            // Use sign of amount
-            if (amount >= 0) {
+            int dir = 0;
+            if (col_txn_type >= 0 && col_txn_type < rnc)
+                dir = direction_from_txn_type(row_fields[col_txn_type]);
+
+            // Prefer explicit txn type direction when available; otherwise use
+            // sign of amount.
+            if (dir > 0 || (dir == 0 && amount >= 0)) {
                 row->type = TRANSACTION_INCOME;
-                row->amount_cents = amount;
+                row->amount_cents = amount >= 0 ? amount : -amount;
             } else {
                 row->type = TRANSACTION_EXPENSE;
-                row->amount_cents = -amount;
+                row->amount_cents = amount >= 0 ? amount : -amount;
             }
         }
 
