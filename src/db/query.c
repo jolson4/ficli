@@ -2763,7 +2763,16 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
         0)
         return -1;
 
-    int rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    bool own_txn = sqlite3_get_autocommit(db) != 0;
+    const char *txn_begin_sql = own_txn ? "BEGIN IMMEDIATE"
+                                        : "SAVEPOINT db_update_transfer_sp";
+    const char *txn_commit_sql = own_txn ? "COMMIT"
+                                         : "RELEASE SAVEPOINT db_update_transfer_sp";
+    const char *txn_rollback_sql = own_txn
+                                       ? "ROLLBACK"
+                                       : "ROLLBACK TO SAVEPOINT db_update_transfer_sp";
+
+    int rc = sqlite3_exec(db, txn_begin_sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_update_transfer begin: %s\n", sqlite3_errmsg(db));
         return -1;
@@ -2794,7 +2803,10 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
             source_type = TRANSACTION_TRANSFER;
     } else if (rc == SQLITE_DONE) {
         sqlite3_finalize(stmt);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_exec(db, txn_rollback_sql, NULL, NULL, NULL);
+        if (!own_txn)
+            sqlite3_exec(db, "RELEASE SAVEPOINT db_update_transfer_sp", NULL,
+                         NULL, NULL);
         return -2;
     } else {
         fprintf(stderr, "db_update_transfer step load: %s\n", sqlite3_errmsg(db));
@@ -2989,7 +3001,7 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
             goto rollback;
     }
 
-    rc = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    rc = sqlite3_exec(db, txn_commit_sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_update_transfer commit: %s\n", sqlite3_errmsg(db));
         goto rollback;
@@ -2998,7 +3010,10 @@ int db_update_transfer(sqlite3 *db, const transaction_t *txn,
     return 0;
 
 rollback:
-    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_exec(db, txn_rollback_sql, NULL, NULL, NULL);
+    if (!own_txn)
+        sqlite3_exec(db, "RELEASE SAVEPOINT db_update_transfer_sp", NULL, NULL,
+                     NULL);
     return -1;
 }
 
