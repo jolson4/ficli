@@ -1734,7 +1734,14 @@ int db_get_transactions(sqlite3 *db, int64_t account_id, txn_row_t **out) {
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT t.id, t.amount_cents, t.type, t.date,"
+        "SELECT t.id,"
+        "  CASE"
+        "    WHEN t.type = 'TRANSFER' THEN"
+        "      CASE WHEN t.id = t.transfer_id THEN -ABS(t.amount_cents)"
+        "           ELSE ABS(t.amount_cents) END"
+        "    ELSE t.amount_cents"
+        "  END,"
+        "  t.type, t.date,"
         "  COALESCE(t.reflection_date, ''),"
         "  COALESCE(t.reflection_date, t.date),"
         "  CASE"

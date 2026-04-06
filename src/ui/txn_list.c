@@ -795,7 +795,7 @@ static void format_amount(int64_t cents, transaction_type_t type, char *buf,
     }
     formatted[fi] = '\0';
 
-    if (type == TRANSACTION_EXPENSE)
+    if (type == TRANSACTION_EXPENSE || cents < 0)
         snprintf(buf, buflen, "-%s.%02ld", formatted, (long)frac);
     else
         snprintf(buf, buflen, "%s.%02ld", formatted, (long)frac);
@@ -1756,7 +1756,9 @@ void txn_list_draw(txn_list_state_t *ls, WINDOW *win, bool focused) {
 
         // Amount with color
         int color =
-            (t->type == TRANSACTION_EXPENSE) ? COLOR_EXPENSE : COLOR_INCOME;
+            (t->type == TRANSACTION_EXPENSE || t->amount_cents < 0)
+                ? COLOR_EXPENSE
+                : COLOR_INCOME;
         wattron(win, COLOR_PAIR(color));
         mvwprintw(win, row, amount_col, "%*s", AMOUNT_COL_WIDTH, amt);
         wattroff(win, COLOR_PAIR(color));
