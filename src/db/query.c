@@ -409,7 +409,10 @@ int db_get_accounts(sqlite3 *db, account_t **out) {
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT id, name, type, card_last4, asset_value_cents FROM accounts ORDER BY name", -1, &stmt, NULL);
+        "SELECT id, name, type, card_last4, asset_value_cents"
+        " FROM accounts"
+        " ORDER BY sort_order, name, id",
+        -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_get_accounts prepare: %s\n", sqlite3_errmsg(db));
         return -1;
@@ -457,7 +460,8 @@ int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type,
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO accounts (name, type, card_last4, asset_value_cents) VALUES (?, ?, ?, ?)",
+        "INSERT INTO accounts (name, type, card_last4, asset_value_cents, sort_order)"
+        " VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM accounts))",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "db_insert_account prepare: %s\n", sqlite3_errmsg(db));
@@ -483,6 +487,100 @@ int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type,
     if (rc == SQLITE_CONSTRAINT)
         return -2;
     fprintf(stderr, "db_insert_account step: %s\n", sqlite3_errmsg(db));
+    return -1;
+}
+
+int db_move_account_order(sqlite3 *db, int64_t account_id, int direction) {
+    if (!db || account_id <= 0)
+        return -1;
+    if (direction == 0)
+        return 0;
+
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_stmt *swap_stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db, "SELECT sort_order FROM accounts WHERE id = ?", -1, &stmt, NULL);
+    if (rc != SQLITE_OK)
+        goto rollback;
+
+    sqlite3_bind_int64(stmt, 1, account_id);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return (rc == SQLITE_DONE) ? -2 : -1;
+    }
+    int64_t cur_order = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    if (direction < 0) {
+        rc = sqlite3_prepare_v2(
+            db,
+            "SELECT id, sort_order FROM accounts"
+            " WHERE sort_order < ?"
+            " ORDER BY sort_order DESC, id DESC"
+            " LIMIT 1",
+            -1, &stmt, NULL);
+    } else {
+        rc = sqlite3_prepare_v2(
+            db,
+            "SELECT id, sort_order FROM accounts"
+            " WHERE sort_order > ?"
+            " ORDER BY sort_order ASC, id ASC"
+            " LIMIT 1",
+            -1, &stmt, NULL);
+    }
+    if (rc != SQLITE_OK)
+        goto rollback;
+
+    sqlite3_bind_int64(stmt, 1, cur_order);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return (rc == SQLITE_DONE) ? -3 : -1;
+    }
+
+    int64_t other_id = sqlite3_column_int64(stmt, 0);
+    int64_t other_order = sqlite3_column_int64(stmt, 1);
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    rc = sqlite3_prepare_v2(
+        db, "UPDATE accounts SET sort_order = ? WHERE id = ?", -1, &swap_stmt,
+        NULL);
+    if (rc != SQLITE_OK)
+        goto rollback;
+
+    sqlite3_bind_int64(swap_stmt, 1, other_order);
+    sqlite3_bind_int64(swap_stmt, 2, account_id);
+    rc = sqlite3_step(swap_stmt);
+    if (rc != SQLITE_DONE)
+        goto rollback;
+    sqlite3_reset(swap_stmt);
+    sqlite3_clear_bindings(swap_stmt);
+
+    sqlite3_bind_int64(swap_stmt, 1, cur_order);
+    sqlite3_bind_int64(swap_stmt, 2, other_id);
+    rc = sqlite3_step(swap_stmt);
+    if (rc != SQLITE_DONE)
+        goto rollback;
+
+    sqlite3_finalize(swap_stmt);
+    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+    return 0;
+
+rollback:
+    sqlite3_finalize(stmt);
+    sqlite3_finalize(swap_stmt);
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
     return -1;
 }
 

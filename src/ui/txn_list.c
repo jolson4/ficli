@@ -86,6 +86,7 @@ struct txn_list_state {
     int scroll_offset;
     int next_reload_cursor;
     int64_t next_reload_focus_txn_id;
+    int64_t next_reload_account_id;
     bool center_cursor_next_draw;
     bool dirty;
 };
@@ -197,6 +198,32 @@ static int txn_list_display_index_by_id(const txn_list_state_t *ls, int64_t id) 
             return i;
     }
     return -1;
+}
+
+static int txn_list_account_index_by_id(const txn_list_state_t *ls,
+                                        int64_t account_id) {
+    if (!ls || account_id <= 0 || !ls->accounts)
+        return -1;
+    for (int i = 0; i < ls->account_count; i++) {
+        if (ls->accounts[i].id == account_id)
+            return i;
+    }
+    return -1;
+}
+
+static bool txn_list_move_selected_account(txn_list_state_t *ls, int direction) {
+    if (!ls || ls->account_count <= 1 || ls->account_sel < 0 ||
+        ls->account_sel >= ls->account_count)
+        return false;
+
+    int64_t account_id = ls->accounts[ls->account_sel].id;
+    int rc = db_move_account_order(ls->db, account_id, direction);
+    if (rc != 0)
+        return false;
+
+    ls->next_reload_account_id = account_id;
+    ls->dirty = true;
+    return true;
 }
 
 static bool txn_list_pick_account_popup(txn_list_state_t *ls, WINDOW *parent) {
@@ -1292,6 +1319,13 @@ static void reload(txn_list_state_t *ls) {
     if (ls->account_count < 0)
         ls->account_count = 0;
 
+    if (ls->next_reload_account_id > 0) {
+        int next_sel = txn_list_account_index_by_id(ls, ls->next_reload_account_id);
+        if (next_sel >= 0)
+            ls->account_sel = next_sel;
+    }
+    ls->next_reload_account_id = 0;
+
     if (ls->account_sel >= ls->account_count)
         ls->account_sel = 0;
 
@@ -1344,6 +1378,7 @@ static void reload(txn_list_state_t *ls) {
         ls->cursor = ls->display_count > 0 ? ls->display_count - 1 : 0;
     ls->next_reload_cursor = -1;
     ls->next_reload_focus_txn_id = 0;
+    ls->next_reload_account_id = 0;
 }
 
 txn_list_state_t *txn_list_create(sqlite3 *db) {
@@ -1355,6 +1390,7 @@ txn_list_state_t *txn_list_create(sqlite3 *db) {
     ls->sort_asc = false;
     ls->next_reload_cursor = -1;
     ls->next_reload_focus_txn_id = 0;
+    ls->next_reload_account_id = 0;
     ls->center_cursor_next_draw = false;
     ls->dirty = true;
     return ls;
@@ -2015,6 +2051,14 @@ bool txn_list_handle_input(txn_list_state_t *ls, WINDOW *parent, int ch) {
         return true;
     default:
         // Account switching: '1'-'6' for visible tabs, '9' for picker.
+        if (ch == '[') {
+            txn_list_move_selected_account(ls, -1);
+            return true;
+        }
+        if (ch == ']') {
+            txn_list_move_selected_account(ls, 1);
+            return true;
+        }
         if (ch >= '1' && ch <= '6') {
             int tab_start = 0;
             if (ls->account_sel >= 0) {
@@ -2053,7 +2097,7 @@ const char *txn_list_status_hint(const txn_list_state_t *ls) {
         return "Type to filter  Enter:done  Esc:clear";
 
     if (ls->txn_count == 0)
-        return "90d chart  1-6 acct  9 more  a add  L auto-link  /filter  s sort  \u2190 back";
+        return "90d chart  [/] reorder acct  1-6 acct  9 more  a add  L auto-link  /filter  s sort  \u2190 back";
 
     const char *filter_tag = ls->filter_len > 0 ? "/filter[on]" : "/filter";
     const char *edit_tag =
@@ -2061,12 +2105,12 @@ const char *txn_list_status_hint(const txn_list_state_t *ls) {
                                                         : "e edit";
     if (ls->selected_count > 0) {
         snprintf(buf, sizeof(buf),
-                 "%d selected  90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-6 acct 9 more "
+                 "%d selected  90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  [/] reorder acct  1-6 acct 9 more "
                  " a add  \u2190 back",
                  ls->selected_count, edit_tag, filter_tag);
     } else {
         snprintf(buf, sizeof(buf),
-                 "90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  1-6 acct 9 more "
+                 "90d chart  \u2191\u2193 move  ^d/^u half-page  space select  %s  c category  D duplicate  d delete  L auto-link  %s  s sort  S dir  [/] reorder acct  1-6 acct 9 more "
                  " a add  \u2190 back",
                  edit_tag, filter_tag);
     }

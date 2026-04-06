@@ -22,6 +22,11 @@ int64_t db_insert_account(sqlite3 *db, const char *name, account_type_t type,
 // Returns 0 on success, -2 on uniqueness conflict, -1 on error.
 int db_update_account(sqlite3 *db, const account_t *account);
 
+// Move account ordering by one position. direction < 0 moves earlier,
+// direction > 0 moves later. Returns 0 on success, -3 if already at edge,
+// -2 if account not found, -1 on error.
+int db_move_account_order(sqlite3 *db, int64_t account_id, int direction);
+
 typedef enum {
     LOAN_KIND_CAR = 0,
     LOAN_KIND_MORTGAGE = 1,

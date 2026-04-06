@@ -194,6 +194,22 @@ static int migrate_schema(sqlite3 *db) {
             return -1;
     }
 
+    if (!table_has_column(db, "accounts", "sort_order")) {
+        if (exec_sql(db,
+                     "ALTER TABLE accounts"
+                     " ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;") != 0)
+            return -1;
+    }
+    if (exec_sql(db,
+                 "UPDATE accounts"
+                 " SET sort_order = id"
+                 " WHERE sort_order <= 0;") != 0)
+        return -1;
+    if (exec_sql(db,
+                 "CREATE INDEX IF NOT EXISTS idx_accounts_sort_order"
+                 " ON accounts(sort_order);") != 0)
+        return -1;
+
     if (!table_has_column(db, "loan_profiles", "split_principal_cents")) {
         if (exec_sql(db,
                      "ALTER TABLE loan_profiles"
@@ -311,7 +327,8 @@ static int create_schema(sqlite3 *db) {
         "    type TEXT NOT NULL DEFAULT 'CASH'"
         "        CHECK(type IN ('CASH','CHECKING','SAVINGS','CREDIT_CARD','PHYSICAL_ASSET','INVESTMENT','LOAN')),"
         "    card_last4 TEXT,"
-        "    asset_value_cents INTEGER NOT NULL DEFAULT 0"
+        "    asset_value_cents INTEGER NOT NULL DEFAULT 0,"
+        "    sort_order INTEGER NOT NULL DEFAULT 0"
         ");"
 
         "CREATE TABLE IF NOT EXISTS categories ("
